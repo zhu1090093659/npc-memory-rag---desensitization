@@ -3,8 +3,11 @@ NPC Memory RAG Service - Facade layer
 Provides backward-compatible interface by composing memory modules
 """
 
-from typing import List, Optional
+import os
+import json
 import hashlib
+from typing import List, Optional
+from datetime import datetime
 
 from src.memory import (
     Memory,
@@ -15,6 +18,107 @@ from src.memory import (
     MemoryWriter,
     create_index_if_not_exists
 )
+
+# Redis cache settings
+REDIS_URL = os.getenv("REDIS_URL", "")
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
+CACHE_KEY_VERSION = "v1"  # Bump this to invalidate all cache
+
+
+class RedisCacheAdapter:
+    """
+    Redis cache adapter for memory query results.
+    Serializes Memory objects to JSON (without vectors to save space).
+    """
+
+    def __init__(self, redis_url: str = None, ttl: int = None):
+        self.ttl = ttl or CACHE_TTL_SECONDS
+        self._client = None
+        self._init_client(redis_url or REDIS_URL)
+
+    def _init_client(self, redis_url: str):
+        """Initialize Redis client"""
+        if not redis_url:
+            print("[RedisCacheAdapter] No REDIS_URL, cache disabled")
+            return
+
+        try:
+            import redis
+            self._client = redis.from_url(redis_url, decode_responses=True)
+            self._client.ping()
+            print(f"[RedisCacheAdapter] Connected to Redis")
+        except ImportError:
+            print("[RedisCacheAdapter] redis package not installed, cache disabled")
+        except Exception as e:
+            print(f"[RedisCacheAdapter] Failed to connect: {e}, cache disabled")
+            self._client = None
+
+    def get(self, key: str) -> Optional[List[Memory]]:
+        """Get cached memories"""
+        if not self._client:
+            return None
+
+        try:
+            versioned_key = f"{CACHE_KEY_VERSION}:{key}"
+            data = self._client.get(versioned_key)
+            if data:
+                return self._deserialize(data)
+        except Exception as e:
+            print(f"[RedisCacheAdapter] Get error: {e}")
+        return None
+
+    def setex(self, key: str, ttl: int, memories: List[Memory]):
+        """Set cached memories with TTL"""
+        if not self._client:
+            return
+
+        try:
+            versioned_key = f"{CACHE_KEY_VERSION}:{key}"
+            data = self._serialize(memories)
+            self._client.setex(versioned_key, ttl or self.ttl, data)
+        except Exception as e:
+            print(f"[RedisCacheAdapter] Set error: {e}")
+
+    def _serialize(self, memories: List[Memory]) -> str:
+        """Serialize memories to JSON (without vectors)"""
+        items = []
+        for m in memories:
+            items.append({
+                "id": m.id,
+                "player_id": m.player_id,
+                "npc_id": m.npc_id,
+                "memory_type": m.memory_type.value,
+                "content": m.content,
+                "emotion_tags": m.emotion_tags,
+                "importance": m.importance,
+                "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                "game_context": m.game_context
+            })
+        return json.dumps(items, ensure_ascii=False)
+
+    def _deserialize(self, data: str) -> List[Memory]:
+        """Deserialize JSON to Memory objects"""
+        items = json.loads(data)
+        memories = []
+        for item in items:
+            memories.append(Memory(
+                id=item["id"],
+                player_id=item["player_id"],
+                npc_id=item["npc_id"],
+                memory_type=MemoryType(item["memory_type"]),
+                content=item["content"],
+                emotion_tags=item.get("emotion_tags", []),
+                importance=item.get("importance", 0.5),
+                timestamp=datetime.fromisoformat(item["timestamp"]) if item.get("timestamp") else None,
+                game_context=item.get("game_context")
+            ))
+        return memories
+
+
+def create_redis_cache(redis_url: str = None, ttl: int = None) -> Optional[RedisCacheAdapter]:
+    """Factory function to create Redis cache (returns None if not available)"""
+    adapter = RedisCacheAdapter(redis_url, ttl)
+    return adapter if adapter._client else None
 
 
 class NPCMemoryService:
@@ -45,12 +149,16 @@ class NPCMemoryService:
         """
         Hybrid search: BM25 + Vector + RRF fusion
         """
+        from src.metrics import inc_cache_hit, inc_cache_miss
+
         # Check cache
         cache_key = self._cache_key(player_id, npc_id, query)
         if self.cache:
             cached = self.cache.get(cache_key)
             if cached:
+                inc_cache_hit()
                 return cached
+            inc_cache_miss()
 
         # Delegate to searcher
         memories = self.searcher.search_memories(

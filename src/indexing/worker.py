@@ -2,6 +2,7 @@
 Indexing worker: pull tasks from Pub/Sub and process them
 """
 
+import time
 from typing import List, Optional
 from datetime import datetime
 from elasticsearch import Elasticsearch
@@ -10,6 +11,10 @@ from elasticsearch.helpers import bulk, BulkIndexError
 from .pubsub_client import PubSubSubscriber
 from .tasks import IndexTask
 from src.memory import Memory, MemoryType, EmbeddingService
+from src.metrics import (
+    inc_worker_pulled, inc_worker_processed,
+    observe_bulk_latency, set_batch_size
+)
 
 
 class IndexingWorker:
@@ -43,6 +48,9 @@ class IndexingWorker:
         if not messages:
             return {"pulled": 0, "processed": 0, "errors": 0}
 
+        inc_worker_pulled(len(messages))
+        set_batch_size(len(messages))
+
         # Separate valid tasks from parse errors
         valid_tasks = []
         valid_ack_ids = []
@@ -58,14 +66,19 @@ class IndexingWorker:
         # Process valid tasks
         success_count, error_count = self._process_tasks(valid_tasks, batch_size)
 
-        # Ack successfully processed messages
-        # (simple strategy: ack all valid tasks; for production add partial ack logic)
-        if success_count > 0 and valid_ack_ids:
+        # Ack only if ALL tasks in batch succeeded (safer for data integrity)
+        if error_count == 0 and success_count == len(valid_tasks) and valid_ack_ids:
             self.subscriber.ack(valid_ack_ids)
+            inc_worker_processed("success", success_count)
+        else:
+            # Nack all on partial failure (triggers retry/DLQ)
+            self.subscriber.nack(valid_ack_ids)
+            inc_worker_processed("error", len(valid_tasks))
 
         # Nack parse errors (will retry or go to dead letter)
         if error_ack_ids:
             self.subscriber.nack(error_ack_ids)
+            inc_worker_processed("error", len(error_ack_ids))
 
         return {
             "pulled": len(messages),
@@ -163,6 +176,7 @@ class IndexingWorker:
 
         for i in range(0, len(actions), batch_size):
             batch = actions[i:i + batch_size]
+            start_time = time.time()
             try:
                 success, failed = bulk(
                     self.es,
@@ -170,9 +184,11 @@ class IndexingWorker:
                     raise_on_error=False,
                     refresh=False
                 )
+                observe_bulk_latency(time.time() - start_time)
                 success_count += success
                 error_count += len(failed)
             except BulkIndexError as e:
+                observe_bulk_latency(time.time() - start_time)
                 error_count += len(e.errors)
                 for error in e.errors:
                     print(f"Bulk error: {error}")

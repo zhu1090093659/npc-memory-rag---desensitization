@@ -1,7 +1,10 @@
-# NPC Memory RAG - Elasticsearch 集群配置
-# 展示：高可用部署、冷热分离、ILM策略
+# NPC Memory RAG - 完整开发环境配置
+# 包含：ES 集群、Redis 缓存、Prometheus 监控
 #
-# 使用方式：docker-compose up -d
+# 使用方式：
+#   完整环境：docker-compose up -d
+#   仅 ES：docker-compose up -d es-coordinator kibana
+#   轻量开发：docker-compose -f docker-compose.yml up -d redis prometheus es-coordinator
 
 version: '3.8'
 
@@ -195,6 +198,56 @@ services:
     networks:
       - es-network
 
+  # ============================================================
+  # Redis - 查询结果缓存
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - es-network
+
+  # ============================================================
+  # Prometheus - 指标采集
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - es-network
+
+  # ============================================================
+  # Grafana - 监控可视化（可选）
+  # ============================================================
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - es-network
+    depends_on:
+      - prometheus
+
 networks:
   es-network:
     driver: bridge
@@ -204,3 +257,6 @@ volumes:
   es-hot-02-data:
   es-warm-01-data:
   es-warm-02-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

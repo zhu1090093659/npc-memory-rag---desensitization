@@ -29,21 +29,30 @@ def main():
     check_file_exists("src/indexing/tasks.py")
     check_file_exists("src/indexing/pubsub_client.py")
     check_file_exists("src/indexing/worker.py")
+    check_file_exists("src/indexing/push_app.py")
 
     print("\nFacade & Utils:")
     check_file_exists("src/memory_service.py")
     check_file_exists("src/es_client.py")
+    check_file_exists("src/metrics.py")
 
     print("\nExamples:")
     check_file_exists("examples/init_es.py")
     check_file_exists("examples/publish_task.py")
     check_file_exists("examples/run_worker.py")
+    check_file_exists("examples/rollover_index.py")
 
     print("\nDocumentation:")
     check_file_exists("README.md")
     check_file_exists("ASYNC_INDEXING.md")
     check_file_exists("REFACTORING_SUMMARY.md")
+    check_file_exists("PROJECT_OVERVIEW.md")
+    check_file_exists("CLAUDE.md")
     check_file_exists("requirements.txt")
+
+    print("\nDocker & Config:")
+    check_file_exists("docker-compose.yml")
+    check_file_exists("prometheus.yml")
 
     print("\n=== Verification Complete ===")
 

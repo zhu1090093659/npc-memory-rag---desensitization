@@ -2,13 +2,31 @@
 Elasticsearch index schema and settings
 """
 
+import os
+from datetime import datetime
+
 
 # Index alias for memories
 INDEX_ALIAS = "npc_memories"
 
+# Vector dimension (from env, must match embedding model output)
+INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "1024"))
 
-# ES index settings and mappings
-INDEX_SETTINGS = {
+
+def get_index_settings(vector_dims: int = None) -> dict:
+    """
+    Get index settings with configurable vector dimension.
+    Args:
+        vector_dims: Override vector dimension (default: INDEX_VECTOR_DIMS)
+    """
+    dims = vector_dims or INDEX_VECTOR_DIMS
+    settings = _BASE_INDEX_SETTINGS.copy()
+    settings["mappings"] = _get_mappings(dims)
+    return settings
+
+
+# ES index settings (without mappings)
+_BASE_INDEX_SETTINGS = {
     "settings": {
         "number_of_shards": 30,
         "number_of_replicas": 1,
@@ -39,9 +57,13 @@ INDEX_SETTINGS = {
                 }
             }
         }
-    },
+    }
+}
 
-    "mappings": {
+
+def _get_mappings(dims: int) -> dict:
+    """Generate mappings with specified vector dimension"""
+    return {
         "properties": {
             "player_id": {"type": "keyword"},
             "npc_id": {"type": "keyword"},
@@ -56,7 +78,7 @@ INDEX_SETTINGS = {
             # Vector field - critical configuration
             "content_vector": {
                 "type": "dense_vector",
-                "dims": 1024,
+                "dims": dims,
                 "index": True,
                 "similarity": "cosine",
                 "index_options": {
@@ -80,7 +102,10 @@ INDEX_SETTINGS = {
             }
         }
     }
-}
+
+
+# Backward compatibility: static settings with default dims
+INDEX_SETTINGS = get_index_settings()
 
 
 def create_index_if_not_exists(es_client, index_name: str = None):
