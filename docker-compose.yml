@@ -1,0 +1,206 @@
+# NPC Memory RAG - Elasticsearch 集群配置
+# 展示：高可用部署、冷热分离、ILM策略
+#
+# 使用方式：docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============================================================
+  # Master节点 - 负责集群管理
+  # ============================================================
+  es-master-01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-master-01
+    environment:
+      - node.name=es-master-01
+      - node.roles=master
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - cluster.initial_master_nodes=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - es-network
+
+  es-master-02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-master-02
+    environment:
+      - node.name=es-master-02
+      - node.roles=master
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - cluster.initial_master_nodes=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - es-network
+
+  es-master-03:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-master-03
+    environment:
+      - node.name=es-master-03
+      - node.roles=master
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - cluster.initial_master_nodes=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - es-network
+
+  # ============================================================
+  # Hot数据节点 - SSD存储，处理近期数据
+  # ============================================================
+  es-hot-01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-hot-01
+    environment:
+      - node.name=es-hot-01
+      - node.roles=data_hot,data_content,ingest
+      - node.attr.data=hot
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms4g -Xmx4g"  # 生产建议：不超过32GB
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-hot-01-data:/usr/share/elasticsearch/data
+    networks:
+      - es-network
+
+  es-hot-02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-hot-02
+    environment:
+      - node.name=es-hot-02
+      - node.roles=data_hot,data_content,ingest
+      - node.attr.data=hot
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms4g -Xmx4g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-hot-02-data:/usr/share/elasticsearch/data
+    networks:
+      - es-network
+
+  # ============================================================
+  # Warm数据节点 - HDD存储，处理历史数据
+  # ============================================================
+  es-warm-01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-warm-01
+    environment:
+      - node.name=es-warm-01
+      - node.roles=data_warm
+      - node.attr.data=warm
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-warm-01-data:/usr/share/elasticsearch/data
+    networks:
+      - es-network
+
+  es-warm-02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-warm-02
+    environment:
+      - node.name=es-warm-02
+      - node.roles=data_warm
+      - node.attr.data=warm
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-warm-02-data:/usr/share/elasticsearch/data
+    networks:
+      - es-network
+
+  # ============================================================
+  # Kibana - 可视化和管理
+  # ============================================================
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=["http://es-hot-01:9200","http://es-hot-02:9200"]
+    ports:
+      - "5601:5601"
+    networks:
+      - es-network
+    depends_on:
+      - es-hot-01
+      - es-hot-02
+
+  # ============================================================
+  # 协调节点 - 处理客户端请求
+  # ============================================================
+  es-coordinator:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es-coordinator
+    environment:
+      - node.name=es-coordinator
+      - node.roles=[]  # 纯协调节点
+      - cluster.name=npc-memory-cluster
+      - discovery.seed_hosts=es-master-01,es-master-02,es-master-03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    networks:
+      - es-network
+
+networks:
+  es-network:
+    driver: bridge
+
+volumes:
+  es-hot-01-data:
+  es-hot-02-data:
+  es-warm-01-data:
+  es-warm-02-data:

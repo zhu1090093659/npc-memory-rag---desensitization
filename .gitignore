@@ -1,0 +1,5 @@
+.ace-tool/
+docs
+.cursor/
+.claude/
+*.pyc
