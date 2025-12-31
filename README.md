@@ -141,6 +141,7 @@ python examples/run_worker.py --push
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `ES_URL` | http://localhost:9200 | ES 地址 |
+| `ES_API_KEY` | - | Elastic Cloud API Key |
 | `INDEX_ASYNC_ENABLED` | false | 异步索引开关 |
 
 ### Embedding 配置
@@ -167,19 +168,24 @@ python examples/run_worker.py --push
 | `PORT` | 8080 | Push 模式端口 |
 | `METRICS_PORT` | 8000 | 指标端口 |
 
-## Cloud Run 部署
+## Cloud Run 部署 (香港 asia-east2)
 
 ```bash
+# 部署 Push Worker
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region us-central1 \
-  --set-env-vars WORKER_MODE=push \
-  --set-secrets MODELSCOPE_API_KEY=modelscope-key:latest \
-  --min-instances 0 \
-  --max-instances 10
+  --region asia-east2 \
+  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
+  --cpu 2 \
+  --memory 4Gi \
+  --timeout 60s \
+  --concurrency 10 \
+  --max-instances 10 \
+  --allow-unauthenticated
 ```
 
-详见 [ASYNC_INDEXING.md](ASYNC_INDEXING.md) 中的部署章节。
+详见 [CLAUDE.md](CLAUDE.md) 和 [ASYNC_INDEXING.md](ASYNC_INDEXING.md) 中的部署章节。
 
 ## 技术栈
 

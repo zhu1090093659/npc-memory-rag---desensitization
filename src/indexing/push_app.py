@@ -17,8 +17,27 @@ from src.memory import Memory, MemoryType, EmbeddingService
 from src.es_client import create_es_client
 from src.metrics import inc_worker_pulled, inc_worker_processed, observe_bulk_latency
 
-# Create FastAPI app
-app = FastAPI(title="NPC Memory Push Worker", version="1.0.0")
+# Create FastAPI app with OpenAPI documentation
+app = FastAPI(
+    title="NPC Memory Push Worker",
+    description="""
+NPC Memory RAG system Push Worker API for processing memory indexing tasks.
+
+This service receives indexing tasks from Google Cloud Pub/Sub push delivery,
+generates embeddings using ModelScope Qwen3, and indexes memories to Elasticsearch.
+
+## Endpoints
+
+- **POST /pubsub/push** - Handle Pub/Sub push messages
+- **GET /health** - Health check
+- **GET /ready** - Readiness check (verifies ES connection)
+- **GET /metrics** - Prometheus metrics
+""",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
 # Lazy-initialized components
 _es_client = None
@@ -121,10 +140,10 @@ async def process_single_task(task: IndexTask) -> bool:
         doc = memory.to_es_doc()
 
         start_time = time.time()
+        # Note: routing parameter not supported in Elastic Cloud Serverless mode
         es.index(
             index=os.getenv("INDEX_ALIAS", "npc_memories"),
             id=doc["_id"],
-            routing=doc["_routing"],
             body={k: v for k, v in doc.items() if not k.startswith("_")}
         )
         observe_bulk_latency(time.time() - start_time)

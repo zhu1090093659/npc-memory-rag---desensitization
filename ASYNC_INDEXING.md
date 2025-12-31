@@ -333,47 +333,70 @@ groups:
           summary: "Worker 错误率过高"
 ```
 
-## Cloud Run 部署
+## Cloud Run 部署 (香港 asia-east2)
 
-### 部署 Push Worker
+### 1. 前置准备
 
 ```bash
-# 构建并部署
+# 设置默认 region
+gcloud config set run/region asia-east2
+
+# 启用必要 API
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com
+```
+
+### 2. 创建 Secrets
+
+```bash
+# ES URL
+echo -n "https://your-es-host:443" | gcloud secrets create es-url --data-file=- --replication-policy="automatic"
+
+# ES API Key (用于 Elastic Cloud 认证)
+echo -n "your-es-api-key" | gcloud secrets create es-api-key --data-file=- --replication-policy="automatic"
+
+# ModelScope API Key
+echo -n "your-modelscope-api-key" | gcloud secrets create modelscope-api-key --data-file=- --replication-policy="automatic"
+
+# 授权 Cloud Run 服务账号访问 Secrets
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
+for secret in es-url es-api-key modelscope-api-key; do
+  gcloud secrets add-iam-policy-binding $secret \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor" --quiet
+done
+```
+
+### 3. 部署 Push Worker
+
+```bash
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region us-central1 \
-  --set-env-vars ES_URL=https://your-es-cluster:9243 \
-  --set-env-vars MODELSCOPE_API_KEY=your-api-key \
-  --set-env-vars WORKER_MODE=push \
+  --region asia-east2 \
+  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \
   --memory 4Gi \
-  --min-instances 0 \
-  --max-instances 10 \
-  --concurrency 10 \
   --timeout 60s \
-  --allow-unauthenticated=false
+  --concurrency 10 \
+  --max-instances 10 \
+  --allow-unauthenticated
 ```
 
 ### 环境变量说明
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `ES_URL` | Elasticsearch 地址 | `https://es.example.com:9243` |
+| `ES_URL` | Elasticsearch 地址 | `https://es.example.com:443` |
+| `ES_API_KEY` | Elastic Cloud API Key | (从 Secret Manager 注入) |
 | `MODELSCOPE_API_KEY` | ModelScope API 密钥 | (从 Secret Manager 注入) |
 | `INDEX_VECTOR_DIMS` | 向量维度 | `1024` |
 | `WORKER_MODE` | 工作模式 | `push` |
 
-### 使用 Secret Manager 管理密钥
+### 注意事项
 
-```bash
-# 创建 secret
-echo -n "your-api-key" | gcloud secrets create modelscope-api-key --data-file=-
-
-# 部署时引用
-gcloud run deploy npc-memory-worker \
-  --set-secrets MODELSCOPE_API_KEY=modelscope-api-key:latest \
-  ...
-```
+- Elastic Cloud Serverless 不支持 `routing` 参数，代码中已移除
+- 使用 `ES_API_KEY` 进行 Elastic Cloud 认证，而非 URL 中嵌入密码
 
 ### 自动伸缩说明
 

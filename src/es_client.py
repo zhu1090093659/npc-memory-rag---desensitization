@@ -11,6 +11,7 @@ from src.memory import INDEX_ALIAS, create_index_if_not_exists, get_index_settin
 def create_es_client(
     hosts: list = None,
     es_url: str = None,
+    api_key: str = None,
     **kwargs
 ) -> Elasticsearch:
     """
@@ -19,6 +20,7 @@ def create_es_client(
     Args:
         hosts: List of ES host strings (e.g., ["localhost:9200"])
         es_url: Single ES URL (alternative to hosts)
+        api_key: Elasticsearch API key (base64 encoded or id:key format)
         **kwargs: Additional Elasticsearch client options
 
     Returns:
@@ -28,11 +30,17 @@ def create_es_client(
     if hosts is None and es_url is None:
         es_url = os.getenv("ES_URL", "http://localhost:9200")
 
+    if api_key is None:
+        api_key = os.getenv("ES_API_KEY")
+
     if es_url:
         hosts = [es_url]
 
-    # Create client
-    es = Elasticsearch(hosts, **kwargs)
+    # Create client with optional API key authentication
+    if api_key:
+        es = Elasticsearch(hosts, api_key=api_key, **kwargs)
+    else:
+        es = Elasticsearch(hosts, **kwargs)
 
     # Verify connection
     if not es.ping():

@@ -223,6 +223,7 @@ RRF 融合排序
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `ES_URL` | http://localhost:9200 | ES 连接地址 |
+| `ES_API_KEY` | - | Elastic Cloud API Key |
 | `INDEX_ASYNC_ENABLED` | false | 异步索引开关 |
 | `PUBSUB_PROJECT_ID` | - | GCP 项目 ID |
 | `PUBSUB_TOPIC` | index-tasks | Pub/Sub Topic |

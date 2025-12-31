@@ -57,6 +57,7 @@ Worker 使用 `task_id` 作为 ES 文档 `_id`，重复消息会覆盖而非重�
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `ES_URL` | http://localhost:9200 | Elasticsearch 连接地址 |
+| `ES_API_KEY` | (可选) | Elastic Cloud API Key (用于云端认证) |
 | `INDEX_ASYNC_ENABLED` | false | 异步索引开关 |
 | `PUBSUB_PROJECT_ID` | (必需) | GCP 项目 ID |
 | `PUBSUB_TOPIC` | index-tasks | Pub/Sub Topic 名称 |
@@ -144,22 +145,83 @@ service.add_memory(memory)
 results = service.search_memories(player_id, npc_id, query)
 ```
 
-### Cloud Run 部署
+### Cloud Run 部署 (香港 asia-east2)
+
+**已验证的生产部署配置**:
 
 ```bash
-# 使用 gcloud 部署 Worker
+# 1. 设置默认 region
+gcloud config set run/region asia-east2
+
+# 2. 启用必要 API
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com
+
+# 3. 创建 Secrets (敏感信息存储)
+echo -n "https://your-es-host:443" | gcloud secrets create es-url --data-file=- --replication-policy="automatic"
+echo -n "your-es-api-key" | gcloud secrets create es-api-key --data-file=- --replication-policy="automatic"
+echo -n "your-modelscope-api-key" | gcloud secrets create modelscope-api-key --data-file=- --replication-policy="automatic"
+
+# 4. 授予 Cloud Run 服务账号访问 Secrets 权限
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
+for secret in es-url es-api-key modelscope-api-key; do
+  gcloud secrets add-iam-policy-binding $secret \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor" --quiet
+done
+
+# 5. 部署 Cloud Run 服务 (Push Worker)
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region us-central1 \
-  --set-env-vars PUBSUB_PROJECT_ID=your-project-id \
-  --set-env-vars ES_URL=your-es-url \
+  --region asia-east2 \
+  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \
   --memory 4Gi \
-  --max-instances 10
+  --timeout 60s \
+  --concurrency 10 \
+  --max-instances 10 \
+  --allow-unauthenticated
 
-# 本地已安装 gcloud CLI
-gcloud config list
-gcloud auth list
+# 6. 创建 Pub/Sub 资源
+gcloud pubsub topics create index-tasks
+gcloud pubsub topics create index-tasks-dlq
+gcloud pubsub subscriptions create index-tasks-push \
+  --topic=index-tasks \
+  --push-endpoint=https://npc-memory-worker-$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)").asia-east2.run.app/pubsub/push \
+  --ack-deadline=60 \
+  --max-delivery-attempts=5 \
+  --dead-letter-topic=index-tasks-dlq
+```
+
+**资源清单**:
+- Cloud Run Service: `npc-memory-worker`
+- Region: `asia-east2` (香港)
+- Secrets: `es-url`, `es-api-key`, `modelscope-api-key`
+- Pub/Sub Topic: `index-tasks`, `index-tasks-dlq`
+- Pub/Sub Subscription: `index-tasks-push`
+
+**验证端点**:
+```bash
+# 健康检查
+curl https://<service-url>/health   # {"status":"healthy"}
+curl https://<service-url>/ready    # {"status":"ready"} (验证 ES 连接)
+curl https://<service-url>/metrics  # Prometheus 指标
+
+# 发布测试任务
+gcloud pubsub topics publish index-tasks --message='{"task_id":"test-001","player_id":"player_1","npc_id":"npc_1","memory_type":"dialogue","content":"Test memory content","importance":0.8,"emotion_tags":["happy"],"timestamp":"2025-01-01T00:00:00","game_context":{}}'
+```
+
+**故障排查**:
+```bash
+# 查看 Cloud Run 日志
+gcloud run services logs read npc-memory-worker --region asia-east2 --limit 50
+
+# 常见问题:
+# 1. /ready 失败: 检查 ES_URL 和 ES_API_KEY 是否正确
+# 2. Pub/Sub 推送失败: 检查 push-endpoint URL 是否正确
+# 3. Embedding 失败: 检查 MODELSCOPE_API_KEY 是否有效
+# 4. ES 写入失败: Elastic Cloud Serverless 不支持 routing 参数，已在代码中移除
 ```
 
 ## 关键技术细节
