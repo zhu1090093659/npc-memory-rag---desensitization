@@ -89,11 +89,10 @@ class MemorySearcher:
                        "importance", "timestamp", "emotion_tags"]
         }
 
-        # Key optimization: use routing to query single shard
+        # Execute search (routing disabled for Elastic Cloud Serverless compatibility)
         response = self.es.search(
             index=self.index_alias,
             body=body,
-            routing=npc_id,
             request_timeout=10
         )
 
@@ -129,11 +128,10 @@ class MemorySearcher:
                        "importance", "timestamp", "emotion_tags"]
         }
 
-        # Also use routing for optimization
+        # Execute search (routing disabled for Elastic Cloud Serverless compatibility)
         response = self.es.search(
             index=self.index_alias,
             body=body,
-            routing=npc_id,
             request_timeout=10
         )
 

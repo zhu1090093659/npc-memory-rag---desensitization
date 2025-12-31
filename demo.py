@@ -502,17 +502,34 @@ def main():
     print("="*60)
     print("""
 📁 项目文件说明：
-├── docs/ARCHITECTURE.md  - 详细架构设计文档
-├── src/memory_service.py - 完整实现代码（含ES集成）
-├── demo.py               - 本演示脚本
-└── docker-compose.yml    - ES集群配置
+├── docs/ARCHITECTURE.md      - 详细架构设计文档
+├── docs/api/API_REFERENCE.md - API 接口文档
+├── docs/api/openapi.yaml     - OpenAPI 规范
+├── src/memory_service.py     - 完整实现代码（Facade层）
+├── src/indexing/push_app.py  - Cloud Run Push Worker
+├── demo.py                   - 本演示脚本（无依赖）
+└── docker-compose.yml        - 本地 ES 集群配置
+
+☁️  云端部署（已上线）：
+├── Cloud Run (asia-east2)    - Push Worker 服务
+├── Pub/Sub                   - 消息队列 + DLQ
+├── Elastic Cloud             - 向量数据库
+└── Secret Manager            - 密钥管理
+
+🔗 API 端点：
+├── POST /pubsub/push   - Pub/Sub 消息接收
+├── GET  /health        - 健康检查
+├── GET  /ready         - 就绪检查（验证ES连接）
+├── GET  /docs          - Swagger UI
+└── GET  /metrics       - Prometheus 指标
 
 💡 面试时讲解顺序：
 1. 用业务场景开场（NPC个性化记忆）
-2. 画架构图，讲数据流
+2. 画架构图，讲数据流（Game → Pub/Sub → Worker → ES）
 3. 重点讲RRF混合检索（代码级细节）
 4. 讲routing优化、ILM策略
-5. 强调你的优势：懂AI应用层需求
+5. 展示云端部署成果（Cloud Run + Pub/Sub Push）
+6. 强调你的优势：懂AI应用层需求 + 云原生实践
 """)
 
 

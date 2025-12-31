@@ -13,6 +13,8 @@ Environment variables:
     - PUBSUB_PROJECT_ID: GCP project ID (pull mode only)
     - PUBSUB_SUBSCRIPTION: Subscription name (pull mode only)
     - ES_URL: Elasticsearch URL (default: http://localhost:9200)
+    - ES_API_KEY: Elastic Cloud API Key (optional, for cloud auth)
+    - MODELSCOPE_API_KEY: ModelScope API Key (required for embedding)
     - PORT: HTTP port for push mode (default: 8080)
     - METRICS_PORT: Prometheus metrics port for pull mode (default: 8000)
 """
@@ -84,6 +86,8 @@ def run_push_mode():
     print(f"  - GET  /metrics      (Prometheus metrics)")
     print(f"  - GET  /health       (Health check)")
     print(f"  - GET  /ready        (Readiness check)")
+    print(f"  - GET  /docs         (Swagger UI)")
+    print(f"  - GET  /redoc        (ReDoc)")
 
     uvicorn.run(
         "src.indexing.push_app:app",

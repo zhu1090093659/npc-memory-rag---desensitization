@@ -6,6 +6,7 @@ Usage:
 
 Environment variables:
     - ES_URL: Elasticsearch URL (default: http://localhost:9200)
+    - ES_API_KEY: Elastic Cloud API Key (optional, for cloud auth)
 """
 
 import sys
