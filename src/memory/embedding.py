@@ -3,6 +3,7 @@ Embedding service interface with ModelScope Qwen3 integration
 """
 
 import os
+import json
 import random
 import time
 import hashlib
@@ -11,14 +12,22 @@ from typing import List, Optional
 
 
 # Environment variable configs
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "modelscope")
-MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL", "https://api-inference.modelscope.cn/v1")
-MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai_compatible")
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://api.bltcy.ai/v1")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-8b")
+# qwen3-embedding-8b outputs 1024 dimensions
 INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "1024"))
+
+# Backward compatibility aliases
+MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL", EMBEDDING_BASE_URL)
+MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY", EMBEDDING_API_KEY)
 
 # Embedding cache settings
 EMBEDDING_CACHE_ENABLED = os.getenv("EMBEDDING_CACHE_ENABLED", "false").lower() == "true"
+REDIS_URL = os.getenv("REDIS_URL", "")
+EMBEDDING_CACHE_PREFIX = "emb:v1:"
+EMBEDDING_CACHE_TTL = 86400 * 7  # 7 days TTL for embedding vectors
 
 # Retry settings
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "30"))
@@ -36,30 +45,56 @@ class EmbeddingService:
         self.dimension = dimension or INDEX_VECTOR_DIMS
         self._client = None
         self._use_stub = self._should_use_stub()
-        self._cache = {} if EMBEDDING_CACHE_ENABLED else None
+        self._redis_client = None
+        self._cache = None
         self._cache_lock = threading.Lock()  # Thread safety for cache access
+
+        # Initialize cache: prefer Redis, fallback to memory
+        if EMBEDDING_CACHE_ENABLED:
+            self._init_redis_cache()
+            if self._redis_client is None:
+                self._cache = {}  # Fallback to memory cache
 
         if not self._use_stub:
             self._init_client()
+
+    def _init_redis_cache(self):
+        """Initialize Redis cache if available"""
+        if not REDIS_URL:
+            return
+        try:
+            import redis
+            self._redis_client = redis.from_url(REDIS_URL, decode_responses=False)
+            self._redis_client.ping()
+            print(f"[EmbeddingService] Redis cache enabled at {REDIS_URL[:30]}...")
+        except ImportError:
+            print("[EmbeddingService] redis package not installed, using memory cache")
+        except Exception as e:
+            print(f"[EmbeddingService] Redis unavailable: {e}, using memory cache")
 
     def _should_use_stub(self) -> bool:
         """Determine if should use stub based on config"""
         if EMBEDDING_PROVIDER == "stub":
             return True
-        if not MODELSCOPE_API_KEY:
-            print("[EmbeddingService] No MODELSCOPE_API_KEY, falling back to stub")
+        # Check both new and legacy env var names
+        api_key = EMBEDDING_API_KEY or MODELSCOPE_API_KEY
+        if not api_key:
+            print("[EmbeddingService] No EMBEDDING_API_KEY, falling back to stub")
             return True
         return False
 
     def _init_client(self):
-        """Initialize OpenAI-compatible client for ModelScope"""
+        """Initialize OpenAI-compatible client"""
         try:
             from openai import OpenAI
+            # Use new env vars with fallback to legacy names
+            api_key = EMBEDDING_API_KEY or MODELSCOPE_API_KEY
+            base_url = EMBEDDING_BASE_URL or MODELSCOPE_BASE_URL
             self._client = OpenAI(
-                api_key=MODELSCOPE_API_KEY,
-                base_url=MODELSCOPE_BASE_URL
+                api_key=api_key,
+                base_url=base_url
             )
-            print(f"[EmbeddingService] Using ModelScope API with model: {self.model_name}")
+            print(f"[EmbeddingService] Using {base_url} with model: {self.model_name}")
         except ImportError:
             print("[EmbeddingService] openai package not installed, falling back to stub")
             self._use_stub = True
@@ -71,6 +106,39 @@ class EmbeddingService:
         """Generate cache key from text hash"""
         return hashlib.md5(text.encode('utf-8')).hexdigest()
 
+    def _get_from_cache(self, cache_key: str) -> Optional[List[float]]:
+        """Get vector from Redis or memory cache"""
+        # Try Redis first
+        if self._redis_client:
+            try:
+                data = self._redis_client.get(f"{EMBEDDING_CACHE_PREFIX}{cache_key}")
+                if data:
+                    return json.loads(data)
+            except Exception as e:
+                print(f"[EmbeddingService] Redis get error: {e}")
+        # Fallback to memory cache
+        elif self._cache is not None:
+            with self._cache_lock:
+                return self._cache.get(cache_key)
+        return None
+
+    def _set_to_cache(self, cache_key: str, vector: List[float]):
+        """Set vector to Redis or memory cache"""
+        # Try Redis first
+        if self._redis_client:
+            try:
+                self._redis_client.setex(
+                    f"{EMBEDDING_CACHE_PREFIX}{cache_key}",
+                    EMBEDDING_CACHE_TTL,
+                    json.dumps(vector)
+                )
+            except Exception as e:
+                print(f"[EmbeddingService] Redis set error: {e}")
+        # Fallback to memory cache
+        elif self._cache is not None:
+            with self._cache_lock:
+                self._cache[cache_key] = vector
+
     def embed(self, text: str) -> List[float]:
         """Embed single text"""
         if self._use_stub:
@@ -78,19 +146,16 @@ class EmbeddingService:
 
         cache_key = self._get_cache_key(text)
 
-        # Thread-safe cache read
-        if self._cache is not None:
-            with self._cache_lock:
-                if cache_key in self._cache:
-                    return self._cache[cache_key]
+        # Check cache (Redis or memory)
+        cached = self._get_from_cache(cache_key)
+        if cached is not None:
+            return cached
 
-        # Call API with retry (outside lock to avoid blocking other threads)
+        # Call API with retry
         vector = self._embed_with_retry([text])[0]
 
-        # Thread-safe cache write
-        if self._cache is not None:
-            with self._cache_lock:
-                self._cache[cache_key] = vector
+        # Cache the result
+        self._set_to_cache(cache_key, vector)
 
         return vector
 
@@ -102,37 +167,27 @@ class EmbeddingService:
         if self._use_stub:
             return [self._stub_embed(t) for t in texts]
 
-        # Check cache for already embedded texts (thread-safe)
+        # Check cache for already embedded texts
         results = [None] * len(texts)
         texts_to_embed = []
         indices_to_embed = []
 
-        if self._cache is not None:
-            with self._cache_lock:
-                for i, text in enumerate(texts):
-                    cache_key = self._get_cache_key(text)
-                    if cache_key in self._cache:
-                        results[i] = self._cache[cache_key]
-                    else:
-                        texts_to_embed.append(text)
-                        indices_to_embed.append(i)
-        else:
-            texts_to_embed = texts
-            indices_to_embed = list(range(len(texts)))
+        for i, text in enumerate(texts):
+            cache_key = self._get_cache_key(text)
+            cached = self._get_from_cache(cache_key)
+            if cached is not None:
+                results[i] = cached
+            else:
+                texts_to_embed.append(text)
+                indices_to_embed.append(i)
 
-        # Embed uncached texts (outside lock)
+        # Embed uncached texts
         if texts_to_embed:
             vectors = self._embed_with_retry(texts_to_embed)
-            # Thread-safe cache write
-            if self._cache is not None:
-                with self._cache_lock:
-                    for idx, vector in zip(indices_to_embed, vectors):
-                        results[idx] = vector
-                        cache_key = self._get_cache_key(texts[idx])
-                        self._cache[cache_key] = vector
-            else:
-                for idx, vector in zip(indices_to_embed, vectors):
-                    results[idx] = vector
+            for idx, vector in zip(indices_to_embed, vectors):
+                results[idx] = vector
+                cache_key = self._get_cache_key(texts[idx])
+                self._set_to_cache(cache_key, vector)
 
         return results
 

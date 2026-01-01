@@ -145,13 +145,13 @@ service.add_memory(memory)
 results = service.search_memories(player_id, npc_id, query)
 ```
 
-### Cloud Run 部署 (香港 asia-east2)
+### Cloud Run 部署 (新加坡 asia-southeast1，与 ES 同区域)
 
 **已验证的生产部署配置**:
 
 ```bash
 # 1. 设置默认 region
-gcloud config set run/region asia-east2
+gcloud config set run/region asia-southeast1
 
 # 2. 启用必要 API
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
@@ -173,7 +173,7 @@ done
 # 5. 部署 Cloud Run 服务 (Push Worker)
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region asia-east2 \
+  --region asia-southeast1 \
   --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \
@@ -188,7 +188,7 @@ gcloud pubsub topics create index-tasks
 gcloud pubsub topics create index-tasks-dlq
 gcloud pubsub subscriptions create index-tasks-push \
   --topic=index-tasks \
-  --push-endpoint=https://npc-memory-worker-$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)").asia-east2.run.app/pubsub/push \
+  --push-endpoint=https://npc-memory-worker-$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)").asia-southeast1.run.app/pubsub/push \
   --ack-deadline=60 \
   --max-delivery-attempts=5 \
   --dead-letter-topic=index-tasks-dlq
@@ -196,7 +196,7 @@ gcloud pubsub subscriptions create index-tasks-push \
 
 **资源清单**:
 - Cloud Run Service: `npc-memory-worker`
-- Region: `asia-east2` (香港)
+- Region: `asia-southeast1` (新加坡，与 ES 同区域)
 - Secrets: `es-url`, `es-api-key`, `modelscope-api-key`
 - Pub/Sub Topic: `index-tasks`, `index-tasks-dlq`
 - Pub/Sub Subscription: `index-tasks-push`
@@ -215,7 +215,7 @@ gcloud pubsub topics publish index-tasks --message='{"task_id":"test-001","playe
 **故障排查**:
 ```bash
 # 查看 Cloud Run 日志
-gcloud run services logs read npc-memory-worker --region asia-east2 --limit 50
+gcloud run services logs read npc-memory-worker --region asia-southeast1 --limit 50
 
 # 常见问题:
 # 1. /ready 失败: 检查 ES_URL 和 ES_API_KEY 是否正确

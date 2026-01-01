@@ -2,6 +2,7 @@
 Memory search functionality: BM25 + Vector + RRF fusion
 """
 
+import os
 from typing import List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -11,11 +12,15 @@ import hashlib
 from .models import Memory, MemoryType
 
 
+# Thread pool size for parallel BM25 + Vector search
+SEARCH_THREAD_POOL_SIZE = int(os.getenv("SEARCH_THREAD_POOL_SIZE", "16"))
+
+
 class MemorySearcher:
     """Handles hybrid search with BM25, Vector and RRF fusion"""
 
     # Shared thread pool for parallel search execution
-    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="search_")
+    _executor = ThreadPoolExecutor(max_workers=SEARCH_THREAD_POOL_SIZE, thread_name_prefix="search_")
 
     def __init__(self, es_client, embedding_service, index_alias: str = "npc_memories"):
         self.es = es_client

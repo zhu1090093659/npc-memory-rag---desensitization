@@ -22,7 +22,12 @@ from datetime import datetime
 # =============================================================================
 os.environ.setdefault("ES_URL", "https://my-elasticsearch-project-aa20b7.es.asia-southeast1.gcp.elastic.cloud:443")
 os.environ.setdefault("ES_API_KEY", "WjMzYWRKc0I0bzBHYktSaWl0LWk6dlY3N25kZ05jYzBZbURjVFV4NF9kZw==")
-os.environ.setdefault("MODELSCOPE_API_KEY", "ms-970ab2e7-05a6-4fef-8561-869dc1ea2cac")
+# Embedding API Configuration
+os.environ.setdefault("EMBEDDING_API_KEY", "sk-OI98X2iylUhYtncA518f4c7dEa0746A290D590B90c941d01")
+os.environ.setdefault("EMBEDDING_BASE_URL", "https://api.bltcy.ai/v1")
+os.environ.setdefault("EMBEDDING_MODEL", "qwen3-embedding-8b")
+os.environ.setdefault("INDEX_VECTOR_DIMS", "1024")
+# GCP Configuration
 os.environ.setdefault("PUBSUB_PROJECT_ID", "npc-memory-rag")
 os.environ.setdefault("CLOUD_RUN_URL", "https://npc-memory-worker-257652255998.asia-east2.run.app")
 # =============================================================================
