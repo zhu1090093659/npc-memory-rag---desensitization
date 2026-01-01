@@ -6,8 +6,10 @@ Receives HTTP push messages from Google Cloud Pub/Sub
 import os
 import base64
 import json
+import asyncio
 from typing import Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Request, HTTPException, Response
 from pydantic import BaseModel
@@ -16,6 +18,9 @@ from .tasks import IndexTask
 from src.memory import Memory, MemoryType, EmbeddingService
 from src.es_client import create_es_client
 from src.metrics import inc_worker_pulled, inc_worker_processed, observe_bulk_latency
+
+# Thread pool for blocking I/O operations (embedding, ES indexing)
+_worker_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="worker_")
 
 # Create FastAPI app with OpenAPI documentation
 app = FastAPI(
@@ -110,9 +115,9 @@ async def handle_push(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def process_single_task(task: IndexTask) -> bool:
+def _sync_process_task(task: IndexTask) -> bool:
     """
-    Process a single IndexTask.
+    Synchronous task processing (runs in thread pool).
     Returns True on success, False on failure.
     """
     import time
@@ -131,11 +136,11 @@ async def process_single_task(task: IndexTask) -> bool:
             game_context=task.game_context
         )
 
-        # Generate embedding
+        # Generate embedding (blocking I/O)
         embedder = get_embedder()
         memory.content_vector = embedder.embed(memory.content)
 
-        # Index to ES
+        # Index to ES (blocking I/O)
         es = get_es_client()
         doc = memory.to_es_doc()
 
@@ -153,6 +158,15 @@ async def process_single_task(task: IndexTask) -> bool:
     except Exception as e:
         print(f"[PushWorker] Failed to process task {task.task_id}: {e}")
         return False
+
+
+async def process_single_task(task: IndexTask) -> bool:
+    """
+    Process a single IndexTask asynchronously.
+    Runs blocking I/O in thread pool to avoid blocking event loop.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_worker_executor, _sync_process_task, task)
 
 
 @app.get("/metrics")

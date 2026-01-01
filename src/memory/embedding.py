@@ -6,6 +6,7 @@ import os
 import random
 import time
 import hashlib
+import threading
 from typing import List, Optional
 
 
@@ -36,6 +37,7 @@ class EmbeddingService:
         self._client = None
         self._use_stub = self._should_use_stub()
         self._cache = {} if EMBEDDING_CACHE_ENABLED else None
+        self._cache_lock = threading.Lock()  # Thread safety for cache access
 
         if not self._use_stub:
             self._init_client()
@@ -74,18 +76,21 @@ class EmbeddingService:
         if self._use_stub:
             return self._stub_embed(text)
 
-        # Check cache
-        if self._cache is not None:
-            cache_key = self._get_cache_key(text)
-            if cache_key in self._cache:
-                return self._cache[cache_key]
+        cache_key = self._get_cache_key(text)
 
-        # Call API with retry
+        # Thread-safe cache read
+        if self._cache is not None:
+            with self._cache_lock:
+                if cache_key in self._cache:
+                    return self._cache[cache_key]
+
+        # Call API with retry (outside lock to avoid blocking other threads)
         vector = self._embed_with_retry([text])[0]
 
-        # Store in cache
+        # Thread-safe cache write
         if self._cache is not None:
-            self._cache[cache_key] = vector
+            with self._cache_lock:
+                self._cache[cache_key] = vector
 
         return vector
 
@@ -97,32 +102,37 @@ class EmbeddingService:
         if self._use_stub:
             return [self._stub_embed(t) for t in texts]
 
-        # Check cache for already embedded texts
+        # Check cache for already embedded texts (thread-safe)
         results = [None] * len(texts)
         texts_to_embed = []
         indices_to_embed = []
 
         if self._cache is not None:
-            for i, text in enumerate(texts):
-                cache_key = self._get_cache_key(text)
-                if cache_key in self._cache:
-                    results[i] = self._cache[cache_key]
-                else:
-                    texts_to_embed.append(text)
-                    indices_to_embed.append(i)
+            with self._cache_lock:
+                for i, text in enumerate(texts):
+                    cache_key = self._get_cache_key(text)
+                    if cache_key in self._cache:
+                        results[i] = self._cache[cache_key]
+                    else:
+                        texts_to_embed.append(text)
+                        indices_to_embed.append(i)
         else:
             texts_to_embed = texts
             indices_to_embed = list(range(len(texts)))
 
-        # Embed uncached texts
+        # Embed uncached texts (outside lock)
         if texts_to_embed:
             vectors = self._embed_with_retry(texts_to_embed)
-            for idx, vector in zip(indices_to_embed, vectors):
-                results[idx] = vector
-                # Store in cache
-                if self._cache is not None:
-                    cache_key = self._get_cache_key(texts[idx])
-                    self._cache[cache_key] = vector
+            # Thread-safe cache write
+            if self._cache is not None:
+                with self._cache_lock:
+                    for idx, vector in zip(indices_to_embed, vectors):
+                        results[idx] = vector
+                        cache_key = self._get_cache_key(texts[idx])
+                        self._cache[cache_key] = vector
+            else:
+                for idx, vector in zip(indices_to_embed, vectors):
+                    results[idx] = vector
 
         return results
 

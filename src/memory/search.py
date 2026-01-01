@@ -4,6 +4,7 @@ Memory search functionality: BM25 + Vector + RRF fusion
 
 from typing import List, Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import math
 import hashlib
 
@@ -12,6 +13,9 @@ from .models import Memory, MemoryType
 
 class MemorySearcher:
     """Handles hybrid search with BM25, Vector and RRF fusion"""
+
+    # Shared thread pool for parallel search execution
+    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="search_")
 
     def __init__(self, es_client, embedding_service, index_alias: str = "npc_memories"):
         self.es = es_client
@@ -48,9 +52,17 @@ class MemorySearcher:
                 }
             })
 
-        # Execute both searches in parallel
-        bm25_results = self._bm25_search(query, filters, npc_id, top_k * 2)
-        vector_results = self._vector_search(query, filters, npc_id, top_k * 2)
+        # Execute both searches in parallel using ThreadPoolExecutor
+        future_bm25 = self._executor.submit(
+            self._bm25_search, query, filters, npc_id, top_k * 2
+        )
+        future_vector = self._executor.submit(
+            self._vector_search, query, filters, npc_id, top_k * 2
+        )
+
+        # Wait for both results with timeout
+        bm25_results = future_bm25.result(timeout=15)
+        vector_results = future_vector.result(timeout=15)
 
         # RRF fusion
         fused_results = self._rrf_fusion(bm25_results, vector_results, top_k)
@@ -154,10 +166,16 @@ class MemorySearcher:
         bm25_ranks = {r["id"]: i + 1 for i, r in enumerate(bm25_results)}
         vector_ranks = {r["id"]: i + 1 for i, r in enumerate(vector_results)}
 
+        # Pre-build id -> doc mapping for O(1) lookup (optimized from O(n^2))
+        doc_map = {r["id"]: r["doc"] for r in bm25_results}
+        for r in vector_results:
+            if r["id"] not in doc_map:
+                doc_map[r["id"]] = r["doc"]
+
         # Merge all document IDs
         all_ids = set(bm25_ranks.keys()) | set(vector_ranks.keys())
 
-        # Calculate RRF scores
+        # Calculate RRF scores with O(1) doc lookup
         rrf_scores = []
         for doc_id in all_ids:
             score = 0
@@ -166,11 +184,7 @@ class MemorySearcher:
             if doc_id in vector_ranks:
                 score += 1.0 / (k + vector_ranks[doc_id])
 
-            # Get original document
-            doc = next(
-                (r["doc"] for r in bm25_results + vector_results if r["id"] == doc_id),
-                None
-            )
+            doc = doc_map.get(doc_id)
             if doc:
                 rrf_scores.append({"id": doc_id, "rrf_score": score, "doc": doc})
 

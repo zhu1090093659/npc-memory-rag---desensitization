@@ -36,11 +36,22 @@ def create_es_client(
     if es_url:
         hosts = [es_url]
 
+    # Default connection pool and retry config for high concurrency
+    default_config = {
+        "max_retries": 3,
+        "retry_on_timeout": True,
+        "timeout": 30,
+        "http_compress": True,
+    }
+
+    # Merge with user-provided kwargs (user config takes precedence)
+    config = {**default_config, **kwargs}
+
     # Create client with optional API key authentication
     if api_key:
-        es = Elasticsearch(hosts, api_key=api_key, **kwargs)
+        es = Elasticsearch(hosts, api_key=api_key, **config)
     else:
-        es = Elasticsearch(hosts, **kwargs)
+        es = Elasticsearch(hosts, **config)
 
     # Verify connection
     if not es.ping():
