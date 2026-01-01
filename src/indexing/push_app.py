@@ -1,6 +1,11 @@
 """
 FastAPI Push Worker for Pub/Sub push mode
 Receives HTTP push messages from Google Cloud Pub/Sub
+
+Backpressure mechanism:
+- MAX_INFLIGHT_TASKS controls concurrent task processing
+- Returns 429 when at capacity, triggering Pub/Sub retry
+- Cloud Run autoscaling handles scaling based on request queue
 """
 
 import os
@@ -19,8 +24,12 @@ from src.memory import Memory, MemoryType, EmbeddingService
 from src.es_client import create_es_client
 from src.metrics import inc_worker_pulled, inc_worker_processed, observe_bulk_latency
 
+# Concurrency control: limit in-flight tasks to apply backpressure
+MAX_INFLIGHT_TASKS = int(os.getenv("MAX_INFLIGHT_TASKS", "4"))
+_inflight_semaphore = asyncio.Semaphore(MAX_INFLIGHT_TASKS)
+
 # Thread pool for blocking I/O operations (embedding, ES indexing)
-_worker_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="worker_")
+_worker_executor = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_TASKS, thread_name_prefix="worker_")
 
 # Create FastAPI app with OpenAPI documentation
 app = FastAPI(
@@ -74,9 +83,13 @@ class PubSubMessage(BaseModel):
 @app.post("/pubsub/push")
 async def handle_push(request: Request):
     """
-    Handle Pub/Sub push delivery.
-    Returns 2xx for ack, non-2xx triggers Pub/Sub retry.
+    Handle Pub/Sub push delivery with backpressure.
+    Returns 2xx for ack, 429 when overloaded (triggers Pub/Sub retry).
     """
+    # Backpressure: reject if at capacity (non-blocking check)
+    if _inflight_semaphore.locked():
+        raise HTTPException(status_code=429, detail="At capacity, retry later")
+
     try:
         # Parse request body
         body = await request.json()
@@ -97,8 +110,9 @@ async def handle_push(request: Request):
             inc_worker_processed("error", 1)
             raise HTTPException(status_code=400, detail=f"Invalid task format: {e}")
 
-        # Process single task
-        success = await process_single_task(task)
+        # Process with semaphore (limits concurrent processing)
+        async with _inflight_semaphore:
+            success = await process_single_task(task)
 
         if success:
             inc_worker_processed("success", 1)

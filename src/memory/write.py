@@ -2,11 +2,15 @@
 Memory write operations
 """
 
-from typing import List, Optional
 import os
+from typing import List, Optional
+
 from elasticsearch.helpers import bulk, BulkIndexError
 
 from .models import Memory
+
+# Elastic Cloud Serverless does not support routing parameter
+ES_ROUTING_ENABLED = os.getenv("ES_ROUTING_ENABLED", "false").lower() == "true"
 
 
 class MemoryWriter:
@@ -46,13 +50,16 @@ class MemoryWriter:
         if not memory.content_vector:
             doc["content_vector"] = self.embedder.embed(memory.content)
 
-        response = self.es.index(
-            index=self.index_alias,
-            id=doc["_id"],
-            routing=doc["_routing"],
-            body={k: v for k, v in doc.items() if not k.startswith("_")}
-        )
+        # Build index params (routing not supported in Serverless mode)
+        index_params = {
+            "index": self.index_alias,
+            "id": doc["_id"],
+            "body": {k: v for k, v in doc.items() if not k.startswith("_")}
+        }
+        if ES_ROUTING_ENABLED:
+            index_params["routing"] = doc["_routing"]
 
+        response = self.es.index(**index_params)
         return response["_id"]
 
     def _publish_index_task(self, memory: Memory) -> str:
@@ -88,16 +95,18 @@ class MemoryWriter:
                     m.content_vector = vectors[vector_idx]
                     vector_idx += 1
 
-        # Build bulk operations
+        # Build bulk operations (routing not supported in Serverless mode)
         actions = []
         for memory in memories:
             doc = memory.to_es_doc()
-            actions.append({
+            action = {
                 "_index": self.index_alias,
                 "_id": doc["_id"],
-                "_routing": doc["_routing"],
                 "_source": {k: v for k, v in doc.items() if not k.startswith("_")}
-            })
+            }
+            if ES_ROUTING_ENABLED:
+                action["_routing"] = doc["_routing"]
+            actions.append(action)
 
         # Execute in batches
         success_count = 0

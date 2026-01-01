@@ -1,6 +1,6 @@
 # 异步索引构建指南
 
-本文档说明如何使用新增的异步索引构建功能（Pub/Sub + Worker + 本地 ES）。
+本文档说明如何使用异步索引功能（Pub/Sub Push + Cloud Run 自动伸缩）。
 
 ## 架构概览
 
@@ -9,50 +9,60 @@
     │
     ├─► [同步模式] 直接写入 ES
     │
-    └─► [异步模式] 发布到 Pub/Sub
+    └─► [异步模式] 发布到 Pub/Sub Topic
             │
-            └─► Worker 拉取任务
+            └─► Pub/Sub Push 投递到 Worker
                     │
-                    ├─► 批量 Embedding
-                    ├─► 批量写入 ES
-                    └─► Ack 消息
+                    ├─► 并发闸门检查（满载返回 429）
+                    ├─► Embedding 生成
+                    ├─► 写入 ES
+                    └─► 返回 2xx (Ack) 或 非2xx (重试)
 ```
+
+## 核心机制
+
+**Backpressure 实现**：Worker 使用 `MAX_INFLIGHT_TASKS` 信号量控制并发，满载时返回 429，Pub/Sub 会自动重试。
+
+**自动伸缩**：Cloud Run 根据请求队列自动扩缩容，配合 `min-instances=0` 实现"空闲缩零、积压扩容"。
 
 ## 环境变量配置
 
-### 必需配置
+### Worker 配置
 
 ```bash
-# Pub/Sub 配置
+# Elasticsearch
+export ES_URL="https://your-es-host:443"
+export ES_API_KEY="your-api-key"           # Elastic Cloud 认证
+
+# Embedding
+export MODELSCOPE_API_KEY="your-key"
+
+# 并发控制
+export MAX_INFLIGHT_TASKS="4"              # 单实例最大并发任务数
+export PORT="8080"                         # HTTP 端口
+```
+
+### 写入端配置
+
+```bash
+# Pub/Sub
 export PUBSUB_PROJECT_ID="your-gcp-project-id"
 export PUBSUB_TOPIC="index-tasks"
-export PUBSUB_SUBSCRIPTION="index-tasks-sub"
-
-# Elasticsearch 配置
-export ES_URL="http://localhost:9200"
 
 # 异步索引开关（默认关闭）
 export INDEX_ASYNC_ENABLED="false"
+
+# Serverless ES 禁用 routing（默认禁用）
+export ES_ROUTING_ENABLED="false"
 ```
 
-### 可选配置
-
-```bash
-# GCP 认证（如果使用 service account）
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
-```
-
-## 快速开始
+## 快速开始（本地开发）
 
 ### 1. 启动本地 Elasticsearch
 
 ```bash
 docker-compose up -d
-```
-
-验证 ES 运行：
-```bash
-curl http://localhost:9200
+curl http://localhost:9200  # 验证
 ```
 
 ### 2. 初始化索引
@@ -61,29 +71,19 @@ curl http://localhost:9200
 python examples/init_es.py
 ```
 
-### 3. 启动 Worker（在独立终端）
+### 3. 启动 Push Worker
 
 ```bash
 python examples/run_worker.py
 ```
 
-Worker 会持续运行，拉取并处理索引任务。
+Worker 启动后会监听 `http://localhost:8080`，等待 Pub/Sub 推送。
 
 ### 4. 发布测试任务
 
 ```bash
-# 确保设置了异步模式
 export INDEX_ASYNC_ENABLED="true"
-
-# 发布示例任务
 python examples/publish_task.py
-```
-
-### 5. 观察 Worker 日志
-
-Worker 终端会显示：
-```
-Batch complete: {'pulled': 3, 'processed': 3, 'errors': 0}
 ```
 
 ## 使用方式
@@ -151,51 +151,43 @@ Worker 使用 `task_id` 作为 ES 的 `_id`，确保：
 
 ## 性能调优
 
-### Worker 参数
+### Worker 并发控制
 
-```python
-worker.run_loop(
-    max_messages=50,  # 每次拉取消息数
-    batch_size=100    # ES bulk 批量大小
-)
+```bash
+# 单实例最大并发任务数（默认 4）
+export MAX_INFLIGHT_TASKS="8"
 ```
+
+满载时返回 429，触发 Pub/Sub 重试，消息留在队列等待 Cloud Run 扩容。
 
 ### 横向扩展
 
-可以启动多个 Worker 实例：
-```bash
-# Terminal 1
-python examples/run_worker.py
+Cloud Run 根据请求队列自动扩容，无需手动管理。关键参数：
 
-# Terminal 2
-python examples/run_worker.py
-```
-
-多个 Worker 会并行消费同一个 subscription。
+- `concurrency`: 单实例并发请求数（建议与 MAX_INFLIGHT_TASKS 一致）
+- `max-instances`: 最大实例数上限
+- `min-instances=0`: 允许缩容到零
 
 ## 回滚到同步模式
 
-只需设置：
+设置环境变量或不传入 publisher：
 ```bash
 export INDEX_ASYNC_ENABLED="false"
 ```
 
-或者不传入 `pubsub_publisher` 参数，系统自动使用同步写入。
-
 ## 常见问题
 
-### Q: Worker 没有拉取到消息？
+### Q: Worker 返回 429 怎么办？
 
-A: 检查：
-1. `PUBSUB_PROJECT_ID` 和 `PUBSUB_SUBSCRIPTION` 是否正确
-2. GCP 认证是否配置
-3. Pub/Sub 订阅是否存在
+A: 这是正常的 backpressure 机制。Pub/Sub 会自动重试，Cloud Run 会自动扩容。如果持续出现，可以：
+1. 增加 `MAX_INFLIGHT_TASKS`
+2. 增加 `max-instances`
 
 ### Q: 如何查看 Pub/Sub 消息堆积？
 
 A: 使用 GCP Console 或 gcloud CLI：
 ```bash
-gcloud pubsub subscriptions describe index-tasks-sub
+gcloud pubsub subscriptions describe index-tasks-push
 ```
 
 ### Q: 本地开发如何测试 Pub/Sub？
@@ -203,27 +195,10 @@ gcloud pubsub subscriptions describe index-tasks-sub
 A: 可以使用 Pub/Sub Emulator：
 ```bash
 gcloud beta emulators pubsub start
-
-# 设置环境变量
 export PUBSUB_EMULATOR_HOST="localhost:8085"
 ```
 
-## Push 模式（推荐用于 Cloud Run）
-
-除了 Pull 模式，系统现在支持 Push 模式，更适合 Cloud Run 等无服务器环境。
-
-### 启动 Push Worker
-
-```bash
-# 方式1: 命令行参数
-python examples/run_worker.py --push
-
-# 方式2: 环境变量
-export WORKER_MODE="push"
-python examples/run_worker.py
-```
-
-### Push Worker 端点
+## Push Worker 端点
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -232,10 +207,9 @@ python examples/run_worker.py
 | `/health` | GET | 健康检查 |
 | `/ready` | GET | 就绪检查（验证 ES 连接） |
 
-### 配置 Pub/Sub Push 订阅
+## 配置 Pub/Sub Push 订阅
 
 ```bash
-# 创建 push 订阅（指向 Cloud Run 服务）
 gcloud pubsub subscriptions create index-tasks-push \
   --topic=index-tasks \
   --push-endpoint=https://your-worker-url.run.app/pubsub/push \
@@ -333,15 +307,14 @@ groups:
           summary: "Worker 错误率过高"
 ```
 
-## Cloud Run 部署 (香港 asia-east2)
+## Cloud Run 部署 (新加坡 asia-southeast1)
+
+建议部署到与 Elasticsearch 同区域以减少延迟。
 
 ### 1. 前置准备
 
 ```bash
-# 设置默认 region
-gcloud config set run/region asia-east2
-
-# 启用必要 API
+gcloud config set run/region asia-southeast1
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com
 ```
@@ -349,16 +322,11 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
 ### 2. 创建 Secrets
 
 ```bash
-# ES URL
 echo -n "https://your-es-host:443" | gcloud secrets create es-url --data-file=- --replication-policy="automatic"
-
-# ES API Key (用于 Elastic Cloud 认证)
 echo -n "your-es-api-key" | gcloud secrets create es-api-key --data-file=- --replication-policy="automatic"
-
-# ModelScope API Key
 echo -n "your-modelscope-api-key" | gcloud secrets create modelscope-api-key --data-file=- --replication-policy="automatic"
 
-# 授权 Cloud Run 服务账号访问 Secrets
+# 授权访问
 PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
 for secret in es-url es-api-key modelscope-api-key; do
   gcloud secrets add-iam-policy-binding $secret \
@@ -372,52 +340,35 @@ done
 ```bash
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region asia-east2 \
-  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --region asia-southeast1 \
+  --set-env-vars "PUBSUB_PROJECT_ID=$(gcloud config get-value project),MAX_INFLIGHT_TASKS=4" \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \
   --memory 4Gi \
   --timeout 60s \
-  --concurrency 10 \
+  --concurrency 4 \
+  --min-instances 0 \
   --max-instances 10 \
   --allow-unauthenticated
 ```
 
-### 环境变量说明
+### 关键参数说明
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `ES_URL` | Elasticsearch 地址 | `https://es.example.com:443` |
-| `ES_API_KEY` | Elastic Cloud API Key | (从 Secret Manager 注入) |
-| `MODELSCOPE_API_KEY` | ModelScope API 密钥 | (从 Secret Manager 注入) |
-| `INDEX_VECTOR_DIMS` | 向量维度 | `1024` |
-| `WORKER_MODE` | 工作模式 | `push` |
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| `min-instances` | 0 | 空闲时缩容到零，节省成本 |
+| `max-instances` | 10 | 扩容上限，防止过度扩容 |
+| `concurrency` | 4 | 单实例并发数，与 MAX_INFLIGHT_TASKS 一致 |
+| `timeout` | 60s | 单次请求超时，含 embedding + ES 写入 |
+
+### 自动伸缩机制
+
+1. **空闲缩零**：无请求时缩容到 0 实例
+2. **按需扩容**：请求队列积压时自动增加实例
+3. **Backpressure**：Worker 满载返回 429，Pub/Sub 暂缓推送
+4. **平滑扩容**：Cloud Run 根据请求延迟和队列深度决定扩容速度
 
 ### 注意事项
 
-- Elastic Cloud Serverless 不支持 `routing` 参数，代码中已移除
-- 使用 `ES_API_KEY` 进行 Elastic Cloud 认证，而非 URL 中嵌入密码
-
-### 自动伸缩说明
-
-- Push 模式天然支持按请求量自动扩缩容
-- `min-instances=0` 允许缩容到零（省成本）
-- `max-instances=10` 限制最大实例数
-- `concurrency=10` 每个实例最多处理 10 个并发请求
-
-### Pull 模式不推荐用于 Cloud Run
-
-Pull 模式需要常驻进程轮询，在 Cloud Run 上：
-- 无法缩容到零
-- 空闲时持续计费
-- 建议改用 Push 模式或 GKE
-
-## 模式对比
-
-| 特性 | Pull 模式 | Push 模式 |
-|------|-----------|-----------|
-| 适用场景 | 本地开发、GKE | Cloud Run、无服务器 |
-| 扩缩容 | 手动/HPA | 自动（按请求） |
-| 空闲成本 | 持续计费 | 可缩容到零 |
-| 批量处理 | 支持 | 单条处理 |
-| 复杂度 | 较低 | 需配置 Push 订阅 |
+- Elastic Cloud Serverless 不支持 `routing` 参数（`ES_ROUTING_ENABLED=false`）
+- `concurrency` 应与 `MAX_INFLIGHT_TASKS` 保持一致，避免资源浪费
