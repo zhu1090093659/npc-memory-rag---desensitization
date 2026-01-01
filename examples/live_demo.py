@@ -275,13 +275,17 @@ def main():
     print("\n[4] Initializing embedding service...")
     try:
         embedder = EmbeddingService()
-        print(f"    Provider: {embedder.provider}")
+        provider = "stub" if embedder._use_stub else f"ModelScope ({embedder.model_name})"
+        print(f"    Provider: {provider}")
     except Exception as e:
         print(f"    Failed: {e}")
         sys.exit(1)
 
-    # Step 5: Query ES directly
-    query_es_directly(es_client, "demo_player", "demo_blacksmith")
+    # Step 5: Query ES directly (use existing test data)
+    # Note: player_1/npc_blacksmith were created during Cloud Run deployment testing
+    player_id = "player_1"
+    npc_id = "npc_blacksmith"
+    query_es_directly(es_client, player_id, npc_id)
 
     # Step 6: Hybrid search demo
     print("\n" + "=" * 60)
@@ -290,15 +294,15 @@ def main():
 
     queries = [
         "你还记得我吗？",
-        "我送你的礼物",
-        "我之前买过什么？"
+        "sword",
+        "blacksmith"
     ]
 
     for query in queries:
         memories = search_memories(
             es_client, embedder,
-            player_id="demo_player",
-            npc_id="demo_blacksmith",
+            player_id=player_id,
+            npc_id=npc_id,
             query=query
         )
 

@@ -68,6 +68,8 @@ class MemorySearcher:
         size: int
     ) -> List[dict]:
         """BM25 keyword search"""
+        # Note: ik_smart analyzer removed for Elastic Cloud Serverless compatibility
+        # Use default analyzer which works for both Chinese and English
         body = {
             "size": size,
             "query": {
@@ -75,10 +77,7 @@ class MemorySearcher:
                     "must": [
                         {
                             "match": {
-                                "content": {
-                                    "query": query,
-                                    "analyzer": "ik_smart"
-                                }
+                                "content": query
                             }
                         }
                     ],
