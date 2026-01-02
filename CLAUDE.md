@@ -380,11 +380,9 @@ es_client.py
 ## 重要文件说明
 
 - **PROJECT_OVERVIEW.md**: 完整的项目总览和架构说明
-- **ASYNC_INDEXING.md**: 异步索引详细指南，包含配置、使用场景、故障排查
-- **REFACTORING_SUMMARY.md**: 记录了从单文件 650 行重构到模块化架构的过程
 - **README.md**: 快速开始指南
 - **docker-compose.yml**: 完整的 ES 集群配置 (3 master + 2 hot + 2 warm)
-- **demo.py**: 无依赖的内存算法演示，可用于面试讲解
+- **./docs/SYSTEM_DESIGN.md**: 系统架构设计
 
 
 

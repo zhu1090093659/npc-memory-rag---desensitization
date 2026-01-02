@@ -1,18 +1,16 @@
 """
 Performance Benchmark Script for NPC Memory RAG System
 
-Tests:
-1. Embedding latency (single & batch)
-2. ES search latency (BM25 & Vector)
-3. Hybrid search end-to-end latency
+End-to-end tests against Cloud Run API Service:
+1. Health/ready check latency
+2. Write latency (POST /memories, request-reply via Pub/Sub + Worker + Redis)
+3. Search latency (GET /search, request-reply via Pub/Sub + Worker + Redis)
 4. Concurrent search throughput
-5. Write throughput
 
 Usage:
     python examples/benchmark.py
 """
 
-import sys
 import os
 import time
 import statistics
@@ -20,25 +18,23 @@ import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+from urllib import request as urllib_request
+from urllib import parse as urllib_parse
+from urllib import error as urllib_error
 
-# =============================================================================
-# Cloud Configuration
-# =============================================================================
-os.environ.setdefault("ES_URL", "https://my-elasticsearch-project-aa20b7.es.asia-southeast1.gcp.elastic.cloud:443")
-os.environ.setdefault("ES_API_KEY", "WjMzYWRKc0I0bzBHYktSaWl0LWk6dlY3N25kZ05jYzBZbURjVFV4NF9kZw==")
-# Embedding API Configuration
-os.environ.setdefault("EMBEDDING_API_KEY", "sk-OI98X2iylUhYtncA518f4c7dEa0746A290D590B90c941d01")
-os.environ.setdefault("EMBEDDING_BASE_URL", "https://api.bltcy.ai/v1")
-os.environ.setdefault("EMBEDDING_MODEL", "qwen3-embedding-8b")
-os.environ.setdefault("INDEX_VECTOR_DIMS", "1024")
-os.environ.setdefault("EMBEDDING_CACHE_ENABLED", "true")  # Enable cache for realistic performance
-
-# Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.es_client import create_es_client
-from src.memory import EmbeddingService, MemorySearcher
+ENV_BENCH_API_BASE_URL = "BENCH_API_BASE_URL"  # required
+ENV_TIMEOUT_SECONDS = "BENCH_TIMEOUT_SECONDS"
+ENV_PLAYER_ID = "BENCH_PLAYER_ID"
+ENV_NPC_ID = "BENCH_NPC_ID"
+ENV_SEED_COUNT = "BENCH_SEED_COUNT"
+ENV_SEED_ENABLED = "BENCH_SEED_ENABLED"
+ENV_SEARCH_ITERATIONS = "BENCH_SEARCH_ITERATIONS"
+ENV_WRITE_ITERATIONS = "BENCH_WRITE_ITERATIONS"
+ENV_WARMUP = "BENCH_WARMUP"
+ENV_CONCURRENCY_LIST = "BENCH_CONCURRENCY_LIST"
+ENV_TOTAL_REQUESTS = "BENCH_TOTAL_REQUESTS"  # total requests per concurrency level
+ENV_VERBOSE_ERRORS = "BENCH_VERBOSE_ERRORS"
 
 
 @dataclass
@@ -75,8 +71,84 @@ def calculate_percentile(data: List[float], percentile: float) -> float:
     return sorted_data[min(index, len(sorted_data) - 1)]
 
 
+def _get_env_int(name: str, default: int) -> int:
+    """Parse int env var with fallback"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    """Parse bool env var with fallback"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _parse_int_list(raw: str, default: List[int]) -> List[int]:
+    """Parse comma-separated int list"""
+    if not raw:
+        return default
+    items: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            items.append(int(part))
+        except Exception:
+            continue
+    return items or default
+
+
+def _http_json(
+    method: str,
+    url: str,
+    payload: Optional[dict],
+    timeout_seconds: int,
+) -> Tuple[int, Optional[dict], float, Optional[str]]:
+    """
+    Perform an HTTP request and parse JSON response.
+    Returns (status_code, json_or_none, latency_ms, error_message_or_none).
+    """
+    data: Optional[bytes] = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    req = urllib_request.Request(url=url, data=data, method=method, headers=headers)
+    start = time.time()
+    try:
+        with urllib_request.urlopen(req, timeout=timeout_seconds) as resp:
+            body = resp.read().decode("utf-8") if resp is not None else ""
+            latency_ms = (time.time() - start) * 1000
+            if not body:
+                return resp.status, None, latency_ms, None
+            try:
+                return resp.status, json.loads(body), latency_ms, None
+            except Exception:
+                return resp.status, None, latency_ms, "Invalid JSON response"
+    except urllib_error.HTTPError as e:
+        latency_ms = (time.time() - start) * 1000
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        err = body or str(e)
+        return int(getattr(e, "code", 0) or 0), None, latency_ms, err
+    except Exception as e:
+        latency_ms = (time.time() - start) * 1000
+        return 0, None, latency_ms, str(e)
+
+
 def benchmark_function(func, iterations: int = 10, warmup: int = 2) -> BenchmarkResult:
-    """Run benchmark on a function"""
+    """Run benchmark on a latency-returning function (returns ms)"""
     # Warmup
     for _ in range(warmup):
         try:
@@ -90,13 +162,14 @@ def benchmark_function(func, iterations: int = 10, warmup: int = 2) -> Benchmark
     start_total = time.time()
 
     for _ in range(iterations):
-        start = time.time()
         try:
-            func()
-            latencies.append((time.time() - start) * 1000)  # Convert to ms
+            latency = func()
+            if latency is not None:
+                latencies.append(float(latency))
         except Exception as e:
             errors += 1
-            print(f"  Error: {e}")
+            if _get_env_bool(ENV_VERBOSE_ERRORS, False):
+                print(f"  Error: {e}")
 
     total_time = time.time() - start_total
 
@@ -124,7 +197,7 @@ def benchmark_function(func, iterations: int = 10, warmup: int = 2) -> Benchmark
 
 
 def benchmark_concurrent(func, concurrency: int, total_requests: int) -> BenchmarkResult:
-    """Run concurrent benchmark"""
+    """Run concurrent benchmark on a latency-returning function (returns ms)"""
     latencies = []
     errors = 0
     start_total = time.time()
@@ -139,7 +212,8 @@ def benchmark_concurrent(func, concurrency: int, total_requests: int) -> Benchma
                     latencies.append(latency)
             except Exception as e:
                 errors += 1
-                print(f"  Concurrent error: {e}")
+                if _get_env_bool(ENV_VERBOSE_ERRORS, False):
+                    print(f"  Concurrent error: {e}")
 
     total_time = time.time() - start_total
 
@@ -167,148 +241,176 @@ def benchmark_concurrent(func, concurrency: int, total_requests: int) -> Benchma
 
 
 def run_benchmarks():
-    """Run all benchmarks - focused on hybrid search with cache comparison"""
+    """Run all benchmarks against Cloud Run API (end-to-end)"""
     print("=" * 70)
     print("NPC Memory RAG Performance Benchmark")
     print("=" * 70)
     print(f"Start time: {datetime.now().isoformat()}")
     print()
 
+    api_base = os.getenv(ENV_BENCH_API_BASE_URL, "").strip().rstrip("/")
+    if not api_base:
+        raise RuntimeError(
+            f"{ENV_BENCH_API_BASE_URL} is required, e.g. https://npc-memory-api-xxxx.asia-southeast1.run.app"
+        )
+
+    timeout_seconds = _get_env_int(ENV_TIMEOUT_SECONDS, 20)
+    player_id = os.getenv(ENV_PLAYER_ID, "player_1")
+    npc_id = os.getenv(ENV_NPC_ID, "npc_blacksmith")
+    seed_count = _get_env_int(ENV_SEED_COUNT, 30)
+    seed_enabled = _get_env_bool(ENV_SEED_ENABLED, True)
+    search_iterations = _get_env_int(ENV_SEARCH_ITERATIONS, 20)
+    write_iterations = _get_env_int(ENV_WRITE_ITERATIONS, 10)
+    warmup = _get_env_int(ENV_WARMUP, 2)
+    concurrency_list = _parse_int_list(os.getenv(ENV_CONCURRENCY_LIST, "2,4,8"), [2, 4, 8])
+    total_requests = _get_env_int(ENV_TOTAL_REQUESTS, 30)
+
     report = BenchmarkReport(
         timestamp=datetime.now().isoformat(),
         environment={
-            "ES_URL": os.getenv("ES_URL", "")[:50] + "...",
-            "EMBEDDING_MODEL": os.getenv("EMBEDDING_MODEL", "qwen3-embedding-8b"),
-            "EMBEDDING_CACHE_ENABLED": os.getenv("EMBEDDING_CACHE_ENABLED", "true"),
+            "BENCH_API_BASE_URL": api_base[:80] + ("..." if len(api_base) > 80 else ""),
+            "BENCH_TIMEOUT_SECONDS": str(timeout_seconds),
+            "BENCH_PLAYER_ID": player_id,
+            "BENCH_NPC_ID": npc_id,
+            "BENCH_SEED_ENABLED": str(seed_enabled),
+            "BENCH_SEED_COUNT": str(seed_count),
+            "BENCH_SEARCH_ITERATIONS": str(search_iterations),
+            "BENCH_WRITE_ITERATIONS": str(write_iterations),
+            "BENCH_WARMUP": str(warmup),
+            "BENCH_CONCURRENCY_LIST": ",".join(str(x) for x in concurrency_list),
+            "BENCH_TOTAL_REQUESTS": str(total_requests),
         }
     )
 
     # ==========================================================================
-    # 1. ES Connection Test
+    # 1. Health / Ready
     # ==========================================================================
-    print("[1] Testing ES Connection...")
-    try:
-        es_client = create_es_client()
-        info = es_client.info()
-        print(f"    Connected to ES cluster: {info['cluster_name']}")
-        print(f"    Version: {info['version']['number']}")
-    except Exception as e:
-        print(f"    ES connection failed: {e}")
-        return report
+    print("[1] Testing API Health/Ready...")
+
+    def call_health() -> float:
+        status, _, latency, err = _http_json("GET", f"{api_base}/health", None, timeout_seconds)
+        if status != 200:
+            raise RuntimeError(f"/health failed: status={status}, err={err}")
+        return latency
+
+    def call_ready() -> float:
+        status, _, latency, err = _http_json("GET", f"{api_base}/ready", None, timeout_seconds)
+        if status != 200:
+            raise RuntimeError(f"/ready failed: status={status}, err={err}")
+        return latency
+
+    health_result = benchmark_function(call_health, iterations=3, warmup=0)
+    health_result.name = "api_health"
+    report.results.append(health_result)
+    ready_result = benchmark_function(call_ready, iterations=3, warmup=0)
+    ready_result.name = "api_ready"
+    report.results.append(ready_result)
+
+    print(f"    /health avg={health_result.avg_ms:.0f}ms p95={health_result.p95_ms:.0f}ms")
+    print(f"    /ready  avg={ready_result.avg_ms:.0f}ms p95={ready_result.p95_ms:.0f}ms")
 
     # ==========================================================================
-    # 2. Embedding Service Verification
+    # 2. Seed Data (optional, recommended)
     # ==========================================================================
-    print("\n[2] Verifying Embedding Service...")
-    embedder = EmbeddingService()
+    print("\n[2] Seeding memories (optional)...")
 
-    if embedder._use_stub:
-        print("    Mode: STUB (no real API calls)")
+    def post_memory(content: str, memory_type: str = "dialogue", importance: float = 0.8) -> float:
+        payload = {
+            "player_id": player_id,
+            "npc_id": npc_id,
+            "memory_type": memory_type,
+            "content": content,
+            "importance": importance,
+            "emotion_tags": ["benchmark"],
+            "game_context": {"source": "benchmark"},
+        }
+        status, body, latency, err = _http_json("POST", f"{api_base}/memories", payload, timeout_seconds)
+        if status != 200:
+            raise RuntimeError(f"POST /memories failed: status={status}, err={err}")
+        if body and body.get("status") not in (None, "completed"):
+            raise RuntimeError(f"POST /memories unexpected response: {body}")
+        return latency
+
+    if seed_enabled:
+        seed_latencies: List[float] = []
+        for i in range(seed_count):
+            content = f"[seed] The blacksmith sold me a sword #{i} at {datetime.now().isoformat()}"
+            try:
+                seed_latencies.append(post_memory(content))
+            except Exception as e:
+                print(f"    Seed error: {e}")
+        if seed_latencies:
+            print(
+                f"    Seeded {len(seed_latencies)}/{seed_count} memories, avg={statistics.mean(seed_latencies):.0f}ms"
+            )
+        else:
+            print("    Seed failed (no successful writes). Search benchmark may be unstable.")
     else:
-        print(f"    Model: {embedder.model_name}")
-    print(f"    Dimension: {embedder.dimension}")
-    print(f"    Cache: {'ENABLED' if embedder._cache is not None else 'DISABLED'}")
-
-    # Quick verification
-    test_vec = embedder.embed("test")
-    print(f"    Verification: OK (vector length={len(test_vec)})")
+        print("    Seed disabled by BENCH_SEED_ENABLED=false")
 
     # ==========================================================================
-    # 3. Hybrid Search Performance Test (Core)
+    # 3. Write Latency Benchmark
     # ==========================================================================
-    print("\n[3] Benchmarking Hybrid Search...")
+    print("\n[3] Benchmarking Write Latency (POST /memories)...")
 
-    searcher = MemorySearcher(es_client, embedder)
-    player_id = "player_1"
-    npc_id = "npc_blacksmith"
+    write_counter = [0]
 
-    # Test queries with different characteristics
-    test_queries = [
-        ("剑", "CN_short"),
-        ("sword", "EN_short"),
-        ("玩家帮助铁匠找回了失落的锤子", "CN_long"),
-        ("The blacksmith offered me a sword for the quest", "EN_long"),
-    ]
+    def timed_write() -> float:
+        write_counter[0] += 1
+        content = f"[write_bench] I need a sword {write_counter[0]} {time.time_ns()}"
+        return post_memory(content, memory_type="dialogue", importance=0.7)
 
-    cold_results = []
-    cache_results = []
-
-    # [3.1] Cold Start Test (clear cache first)
-    print("\n    [3.1] Cold Start (No Cache):")
-    print("    " + "-" * 50)
-    print(f"    {'Query Type':<15} {'Avg (ms)':<12} {'P95 (ms)':<12}")
-    print("    " + "-" * 50)
-
-    # Clear embedding cache for cold start test
-    if hasattr(embedder, '_cache') and embedder._cache is not None:
-        with embedder._cache_lock:
-            embedder._cache.clear()
-
-    for query, desc in test_queries:
-        def hybrid_search(q=query):
-            return searcher.search_memories(player_id, npc_id, q, top_k=5)
-
-        # Only 1 iteration for cold start (first call)
-        result = benchmark_function(hybrid_search, iterations=1, warmup=0)
-        result.name = f"cold_{desc}"
-        cold_results.append(result)
-        print(f"    {desc:<15} {result.avg_ms:<12.0f} {result.p95_ms:<12.0f}")
-        report.results.append(result)
-
-    # [3.2] Cache Hit Test (use same queries again)
-    print("\n    [3.2] Cache Hit Performance:")
-    print("    " + "-" * 50)
-    print(f"    {'Query Type':<15} {'Avg (ms)':<12} {'P95 (ms)':<12}")
-    print("    " + "-" * 50)
-
-    for query, desc in test_queries:
-        def hybrid_search(q=query):
-            return searcher.search_memories(player_id, npc_id, q, top_k=5)
-
-        # Multiple iterations with same query (should hit cache)
-        result = benchmark_function(hybrid_search, iterations=5, warmup=1)
-        result.name = f"cached_{desc}"
-        cache_results.append(result)
-        print(f"    {desc:<15} {result.avg_ms:<12.0f} {result.p95_ms:<12.0f}")
-        report.results.append(result)
-
-    # [3.3] Cache Effect Summary
-    print("\n    [3.3] Cache Effect Summary:")
-    print("    " + "-" * 50)
-
-    avg_cold = statistics.mean([r.avg_ms for r in cold_results]) if cold_results else 0
-    avg_cached = statistics.mean([r.avg_ms for r in cache_results]) if cache_results else 0
-    improvement = avg_cold / avg_cached if avg_cached > 0 else 0
-
-    print(f"    Cold Start Avg:  {avg_cold:.0f}ms")
-    print(f"    Cache Hit Avg:   {avg_cached:.0f}ms")
-    print(f"    Improvement:     {improvement:.1f}x faster with cache")
+    write_result = benchmark_function(timed_write, iterations=write_iterations, warmup=warmup)
+    write_result.name = "write_memories"
+    report.results.append(write_result)
+    print(f"    avg={write_result.avg_ms:.0f}ms p95={write_result.p95_ms:.0f}ms errors={write_result.errors}")
 
     # ==========================================================================
-    # 4. Concurrent Search Throughput Test
+    # 4. Search Latency Benchmark (cold vs cached approximation)
     # ==========================================================================
-    print("\n[4] Benchmarking Concurrent Throughput...")
+    print("\n[4] Benchmarking Search Latency (GET /search)...")
 
-    def timed_search():
-        start = time.time()
-        searcher.search_memories(player_id, npc_id, "sword", top_k=5)
-        return (time.time() - start) * 1000
+    def get_search_latency(query: str, top_k: int = 5) -> float:
+        params = {
+            "player_id": player_id,
+            "npc_id": npc_id,
+            "query": query,
+            "top_k": str(top_k),
+        }
+        url = f"{api_base}/search?{urllib_parse.urlencode(params)}"
+        status, body, latency, err = _http_json("GET", url, None, timeout_seconds)
+        if status != 200:
+            raise RuntimeError(f"GET /search failed: status={status}, err={err}")
+        if body is None or "memories" not in body:
+            raise RuntimeError(f"GET /search invalid response: {body}")
+        return latency
 
-    print("    " + "-" * 50)
-    print(f"    {'Concurrency':<12} {'Throughput':<15} {'Avg (ms)':<12} {'Errors':<10}")
-    print("    " + "-" * 50)
+    # Cold: unique query each time (approximate cache miss)
+    cold_counter = [0]
 
-    for concurrency in [2, 4, 8]:
-        total_requests = concurrency * 3
-        result = benchmark_concurrent(timed_search, concurrency, total_requests)
-        result.name = f"concurrent_{concurrency}"
-        print(f"    {concurrency:<12} {result.throughput:<15.2f} {result.avg_ms:<12.0f} {result.errors:<10}")
-        report.results.append(result)
+    def timed_search_cold() -> float:
+        cold_counter[0] += 1
+        q = f"sword cold {cold_counter[0]} {time.time_ns()}"
+        return get_search_latency(q)
 
-    # ==========================================================================
-    # 5. Analysis and Recommendations
-    # ==========================================================================
-    print("\n[5] Analysis and Recommendations...")
+    # Cached: same query repeated
+    def timed_search_cached() -> float:
+        return get_search_latency("sword")
+
+    cold_result = benchmark_function(timed_search_cold, iterations=min(5, search_iterations), warmup=0)
+    cold_result.name = "search_cold_unique_query"
+    report.results.append(cold_result)
+
+    cached_result = benchmark_function(timed_search_cached, iterations=search_iterations, warmup=warmup)
+    cached_result.name = "search_cached_same_query"
+    report.results.append(cached_result)
+
+    improvement = (cold_result.avg_ms / cached_result.avg_ms) if cached_result.avg_ms > 0 else 0.0
+
+    print(f"    cold avg={cold_result.avg_ms:.0f}ms p95={cold_result.p95_ms:.0f}ms")
+    print(f"    cached avg={cached_result.avg_ms:.0f}ms p95={cached_result.p95_ms:.0f}ms")
+    if improvement > 0:
+        print(f"    improvement={improvement:.1f}x (cached vs cold approximation)")
 
     # Cache effectiveness
     if improvement > 3:
@@ -319,29 +421,42 @@ def run_benchmarks():
         report.bottlenecks.append("Cache benefit is minimal - check cache configuration")
 
     # Latency analysis
-    if avg_cached > 300:
-        report.bottlenecks.append(f"Cached search latency is high ({avg_cached:.0f}ms) - ES network latency")
+    if cached_result.avg_ms > 300:
+        report.bottlenecks.append(f"Cached search latency is high ({cached_result.avg_ms:.0f}ms) - network/ES latency")
         report.recommendations.append("Deploy to same region as Elasticsearch")
 
-    if avg_cold > 1500:
-        report.bottlenecks.append(f"Cold start latency is high ({avg_cold:.0f}ms)")
+    if cold_result.avg_ms > 1500:
+        report.bottlenecks.append(f"Cold search latency is high ({cold_result.avg_ms:.0f}ms)")
         report.recommendations.append("Consider Redis for persistent embedding cache")
 
     # Concurrent scaling
-    concurrent_results = [r for r in report.results if "concurrent" in r.name]
-    if concurrent_results:
-        throughputs = [(int(r.name.split("_")[-1]), r.throughput) for r in concurrent_results]
-        throughputs.sort()
+    # ==========================================================================
+    # 5. Concurrent Search Throughput Test
+    # ==========================================================================
+    print("\n[5] Benchmarking Concurrent Throughput (GET /search)...")
+    print("    " + "-" * 50)
+    print(f"    {'Concurrency':<12} {'Throughput':<15} {'Avg (ms)':<12} {'Errors':<10}")
+    print("    " + "-" * 50)
 
-        if len(throughputs) >= 2:
-            c1, t1 = throughputs[0]
-            c2, t2 = throughputs[-1]
-            scaling_factor = (t2 / t1) / (c2 / c1) if t1 > 0 and c1 > 0 else 0
+    for concurrency in concurrency_list:
+        result = benchmark_concurrent(timed_search_cached, concurrency, total_requests)
+        result.name = f"search_concurrent_{concurrency}"
+        print(f"    {concurrency:<12} {result.throughput:<15.2f} {result.avg_ms:<12.0f} {result.errors:<10}")
+        report.results.append(result)
 
-            if scaling_factor < 0.5:
-                report.bottlenecks.append(f"Poor concurrency scaling ({scaling_factor:.0%})")
-            else:
-                report.recommendations.append(f"Good concurrency scaling ({scaling_factor:.0%})")
+    concurrent_results = [r for r in report.results if r.name.startswith("search_concurrent_")]
+    if len(concurrent_results) >= 2:
+        low = min(concurrent_results, key=lambda r: int(r.name.split("_")[-1]))
+        high = max(concurrent_results, key=lambda r: int(r.name.split("_")[-1]))
+        c1 = int(low.name.split("_")[-1])
+        c2 = int(high.name.split("_")[-1])
+        t1 = low.throughput
+        t2 = high.throughput
+        scaling_factor = (t2 / t1) / (c2 / c1) if t1 > 0 and c1 > 0 else 0
+        if scaling_factor < 0.5:
+            report.bottlenecks.append(f"Poor concurrency scaling ({scaling_factor:.0%})")
+        else:
+            report.recommendations.append(f"Good concurrency scaling ({scaling_factor:.0%})")
 
     # ==========================================================================
     # 6. Summary
@@ -350,20 +465,36 @@ def run_benchmarks():
     print("BENCHMARK SUMMARY")
     print("=" * 70)
 
-    print("\nHybrid Search Performance:")
+    print("\nAPI Health:")
     print("-" * 70)
-    print(f"{'Scenario':<40} {'Avg (ms)':<12} {'P95 (ms)':<12}")
+    print(f"{'Scenario':<40} {'Avg (ms)':<12} {'P95 (ms)':<12} {'Errors':<8}")
     print("-" * 70)
 
     for r in report.results:
-        if "cold" in r.name or "cached" in r.name:
-            print(f"{r.name:<40} {r.avg_ms:<12.0f} {r.p95_ms:<12.0f}")
+        if r.name in ("api_health", "api_ready"):
+            print(f"{r.name:<40} {r.avg_ms:<12.0f} {r.p95_ms:<12.0f} {r.errors:<8d}")
+
+    print("\nWrite:")
+    print("-" * 70)
+    print(f"{'Scenario':<40} {'Avg (ms)':<12} {'P95 (ms)':<12} {'Errors':<8}")
+    print("-" * 70)
+    for r in report.results:
+        if r.name == "write_memories":
+            print(f"{r.name:<40} {r.avg_ms:<12.0f} {r.p95_ms:<12.0f} {r.errors:<8d}")
+
+    print("\nSearch:")
+    print("-" * 70)
+    print(f"{'Scenario':<40} {'Avg (ms)':<12} {'P95 (ms)':<12} {'Errors':<8}")
+    print("-" * 70)
+    for r in report.results:
+        if r.name.startswith("search_") and not r.name.startswith("search_concurrent_"):
+            print(f"{r.name:<40} {r.avg_ms:<12.0f} {r.p95_ms:<12.0f} {r.errors:<8d}")
 
     print("\nConcurrent Throughput:")
     print("-" * 70)
     for r in report.results:
-        if "concurrent" in r.name:
-            print(f"{r.name:<40} {r.throughput:.2f} req/s")
+        if r.name.startswith("search_concurrent_"):
+            print(f"{r.name:<40} {r.throughput:.2f} req/s (avg {r.avg_ms:.0f}ms)")
 
     if report.bottlenecks:
         print("\nBottlenecks:")
