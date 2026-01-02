@@ -386,13 +386,5 @@ es_client.py
 - **docker-compose.yml**: 完整的 ES 集群配置 (3 master + 2 hot + 2 warm)
 - **demo.py**: 无依赖的内存算法演示，可用于面试讲解
 
-## 已完成功能
 
-1. **REST API 服务**: 独立的 FastAPI 服务，提供写入/查询/上下文接口，支持 OpenAPI 文档
-2. **真实 Embedding**: 已集成 ModelScope Qwen3-Embedding-8B，支持自动回退 stub
-3. **Redis 缓存**: 已实现查询结果缓存，支持 TTL 和版本控制
-4. **监控集成**: 已集成 Prometheus 指标，支持缓存/embedding/worker 监控
-5. **Push 模式**: 已实现 FastAPI Push Worker，支持 Pub/Sub HTTP 推送
-6. **死信队列**: 已优化 ack/nack 策略，配合 DLQ 配置指南
-7. **Cloud Run 部署**: 已提供 API + Worker 双服务部署指南和自动伸缩说明
 
