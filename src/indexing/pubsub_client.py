@@ -28,7 +28,13 @@ class PubSubPublisher:
         Returns: message ID
         """
         data = task.to_json().encode("utf-8")
-        future = self.publisher.publish(self.topic_path, data)
+        # Add attributes to help trace producers and message schema.
+        attrs = {
+            "producer": os.getenv("PUBSUB_PRODUCER", "npc-memory-api"),
+            "schema": "IndexTask.v1",
+            "op": str(getattr(task, "op", "") or ""),
+        }
+        future = self.publisher.publish(self.topic_path, data, **attrs)
         message_id = future.result()  # Block until published
         return message_id
 
@@ -40,7 +46,12 @@ class PubSubPublisher:
         futures = []
         for task in tasks:
             data = task.to_json().encode("utf-8")
-            future = self.publisher.publish(self.topic_path, data)
+            attrs = {
+                "producer": os.getenv("PUBSUB_PRODUCER", "npc-memory-api"),
+                "schema": "IndexTask.v1",
+                "op": str(getattr(task, "op", "") or ""),
+            }
+            future = self.publisher.publish(self.topic_path, data, **attrs)
             futures.append(future)
 
         # Wait for all to complete

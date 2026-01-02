@@ -15,6 +15,7 @@ import os
 import time
 import statistics
 import json
+import ssl
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
@@ -35,6 +36,7 @@ ENV_WARMUP = "BENCH_WARMUP"
 ENV_CONCURRENCY_LIST = "BENCH_CONCURRENCY_LIST"
 ENV_TOTAL_REQUESTS = "BENCH_TOTAL_REQUESTS"  # total requests per concurrency level
 ENV_VERBOSE_ERRORS = "BENCH_VERBOSE_ERRORS"
+ENV_HTTP_MAX_RETRIES = "BENCH_HTTP_MAX_RETRIES"
 
 
 @dataclass
@@ -124,27 +126,39 @@ def _http_json(
 
     req = urllib_request.Request(url=url, data=data, method=method, headers=headers)
     start = time.time()
-    try:
-        with urllib_request.urlopen(req, timeout=timeout_seconds) as resp:
-            body = resp.read().decode("utf-8") if resp is not None else ""
-            latency_ms = (time.time() - start) * 1000
-            if not body:
-                return resp.status, None, latency_ms, None
-            try:
-                return resp.status, json.loads(body), latency_ms, None
-            except Exception:
-                return resp.status, None, latency_ms, "Invalid JSON response"
-    except urllib_error.HTTPError as e:
-        latency_ms = (time.time() - start) * 1000
+    max_retries = _get_env_int(ENV_HTTP_MAX_RETRIES, 2)
+
+    for attempt in range(max_retries + 1):
         try:
-            body = e.read().decode("utf-8")
-        except Exception:
-            body = ""
-        err = body or str(e)
-        return int(getattr(e, "code", 0) or 0), None, latency_ms, err
-    except Exception as e:
-        latency_ms = (time.time() - start) * 1000
-        return 0, None, latency_ms, str(e)
+            with urllib_request.urlopen(req, timeout=timeout_seconds) as resp:
+                body = resp.read().decode("utf-8") if resp is not None else ""
+                latency_ms = (time.time() - start) * 1000
+                if not body:
+                    return resp.status, None, latency_ms, None
+                try:
+                    return resp.status, json.loads(body), latency_ms, None
+                except Exception:
+                    return resp.status, None, latency_ms, "Invalid JSON response"
+        except urllib_error.HTTPError as e:
+            latency_ms = (time.time() - start) * 1000
+            try:
+                body = e.read().decode("utf-8")
+            except Exception:
+                body = ""
+            err = body or str(e)
+            return int(getattr(e, "code", 0) or 0), None, latency_ms, err
+        except (ssl.SSLError, urllib_error.URLError, TimeoutError) as e:
+            if attempt < max_retries:
+                time.sleep(0.2 * (2 ** attempt))
+                continue
+            latency_ms = (time.time() - start) * 1000
+            return 0, None, latency_ms, str(e)
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(0.2 * (2 ** attempt))
+                continue
+            latency_ms = (time.time() - start) * 1000
+            return 0, None, latency_ms, str(e)
 
 
 def benchmark_function(func, iterations: int = 10, warmup: int = 2) -> BenchmarkResult:
@@ -254,7 +268,9 @@ def run_benchmarks():
             f"{ENV_BENCH_API_BASE_URL} is required, e.g. https://npc-memory-api-xxxx.asia-southeast1.run.app"
         )
 
-    timeout_seconds = _get_env_int(ENV_TIMEOUT_SECONDS, 20)
+    # Cloud Run request-reply may block up to REQUEST_TIMEOUT_SECONDS (default 25s),
+    # so the client timeout should be safely higher to avoid false timeouts.
+    timeout_seconds = _get_env_int(ENV_TIMEOUT_SECONDS, 60)
     player_id = os.getenv(ENV_PLAYER_ID, "player_1")
     npc_id = os.getenv(ENV_NPC_ID, "npc_blacksmith")
     seed_count = _get_env_int(ENV_SEED_COUNT, 30)

@@ -12,7 +12,8 @@ import os
 import base64
 import json
 import asyncio
-from typing import Optional
+import hashlib
+from typing import Optional, Any, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -122,6 +123,43 @@ class PubSubMessage(BaseModel):
     subscription: Optional[str] = None
 
 
+def _safe_preview(text: str, limit: int = 200) -> str:
+    """Return a safe preview for logs (single line, limited length)."""
+    if text is None:
+        return ""
+    t = text.replace("\r", " ").replace("\n", " ").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + "..."
+
+
+def _task_from_payload(data_str: str) -> IndexTask:
+    """
+    Parse IndexTask from payload string.
+    Primary format: JSON.
+    Compatibility format: python dict literal (single quotes) produced by str(dict).
+    """
+    try:
+        return IndexTask.from_json(data_str)
+    except Exception:
+        # Compatibility: try python literal dict -> json
+        import ast
+
+        obj = ast.literal_eval(data_str)
+        if not isinstance(obj, dict):
+            raise ValueError("Payload is not a dict")
+        return IndexTask(**obj)
+
+
+def _envelope_meta(envelope: PubSubMessage) -> Tuple[str, str, Any]:
+    """Extract useful metadata for debugging."""
+    msg = envelope.message or {}
+    message_id = str(msg.get("messageId") or msg.get("message_id") or "")
+    publish_time = str(msg.get("publishTime") or msg.get("publish_time") or "")
+    attributes = msg.get("attributes") or {}
+    return message_id, publish_time, attributes
+
+
 @app.post("/pubsub/push")
 async def handle_push(request: Request):
     """
@@ -136,21 +174,32 @@ async def handle_push(request: Request):
         # Parse request body
         body = await request.json()
         envelope = PubSubMessage(**body)
+        message_id, publish_time, attributes = _envelope_meta(envelope)
 
         # Decode base64 message data
         if "data" not in envelope.message:
-            raise HTTPException(status_code=400, detail="Missing message data")
+            # Ack and drop: avoid retry storm for malformed messages.
+            print(f"[PushWorker] Drop malformed message (missing data). message_id={message_id} publish_time={publish_time} attributes={attributes}")
+            inc_worker_processed("dropped", 1)
+            return Response(status_code=204)
 
-        data = base64.b64decode(envelope.message["data"]).decode("utf-8")
+        data = base64.b64decode(envelope.message["data"]).decode("utf-8", errors="replace")
         inc_worker_pulled(1)
 
         # Parse IndexTask
         try:
-            task = IndexTask.from_json(data)
+            task = _task_from_payload(data)
         except Exception as e:
-            print(f"[PushWorker] Failed to parse task: {e}")
-            inc_worker_processed("error", 1)
-            raise HTTPException(status_code=400, detail=f"Invalid task format: {e}")
+            digest = hashlib.sha256(data.encode("utf-8", errors="ignore")).hexdigest()[:12]
+            preview = _safe_preview(data)
+            print(
+                "[PushWorker] Drop invalid task payload. "
+                f"message_id={message_id} publish_time={publish_time} "
+                f"attributes={attributes} sha256_12={digest} preview={preview} error={e}"
+            )
+            # Ack and drop: this message is not processable; retrying wastes capacity.
+            inc_worker_processed("dropped", 1)
+            return Response(status_code=204)
 
         # Process with semaphore (limits concurrent processing)
         async with _inflight_semaphore:
