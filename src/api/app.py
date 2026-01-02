@@ -13,6 +13,7 @@ Architecture:
 
 import os
 import time
+import asyncio
 from typing import Optional, List
 
 from fastapi import FastAPI, Query, HTTPException, Depends, Response
@@ -26,10 +27,12 @@ from .schemas import (
     ContextResponse,
     MemoryTypeEnum,
 )
-from .dependencies import get_memory_service, get_publisher, get_es_client
+from .dependencies import get_memory_service, get_publisher, get_es_client, get_reply_store
 from src.memory import MemoryType
 from src.indexing import IndexTask
 from src.metrics import inc_cache_hit, inc_cache_miss
+
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25"))
 
 
 app = FastAPI(
@@ -70,25 +73,18 @@ API Service          Worker Service
 @app.post("/memories", response_model=MemoryCreateResponse, tags=["Memory"])
 async def create_memory(request: MemoryCreateRequest):
     """
-    Create a new memory (async indexing via Pub/Sub)
+    Create a new memory (request-reply via Pub/Sub + Worker).
 
-    The memory will be queued for processing by the Worker service,
-    which generates embeddings and indexes to Elasticsearch.
-
-    **Flow**:
-    1. Create IndexTask with auto-generated task_id
-    2. Publish to Pub/Sub topic
-    3. Return task_id immediately (async processing)
-
-    **Idempotency**: task_id is used as ES document _id,
-    ensuring duplicate messages result in overwrite, not duplicate inserts.
+    The API service publishes an indexing task to Pub/Sub, then blocks waiting
+    for the Worker to write the result to Redis.
     """
     publisher = get_publisher()
+    reply_store = get_reply_store()
 
-    if publisher is None:
+    if publisher is None or reply_store is None:
         raise HTTPException(
             status_code=503,
-            detail="Async indexing not available. Set INDEX_ASYNC_ENABLED=true"
+            detail="Async indexing not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
         )
 
     task = IndexTask.create(
@@ -96,6 +92,7 @@ async def create_memory(request: MemoryCreateRequest):
         npc_id=request.npc_id,
         content=request.content,
         memory_type=request.memory_type.value,
+        op="index",
         importance=request.importance,
         emotion_tags=request.emotion_tags,
         game_context=request.game_context,
@@ -103,13 +100,26 @@ async def create_memory(request: MemoryCreateRequest):
 
     try:
         publisher.publish(task)
-        return MemoryCreateResponse(
-            task_id=task.task_id,
-            status="queued",
-            message="Memory queued for indexing",
-        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to queue task: {e}")
+
+    try:
+        result = await asyncio.to_thread(reply_store.wait, task.task_id, REQUEST_TIMEOUT_SECONDS)
+        if result is None:
+            raise HTTPException(status_code=504, detail=f"Worker timeout (task_id={task.task_id})")
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=500, detail=f"Worker failed: {result}")
+
+        return MemoryCreateResponse(
+            task_id=task.task_id,
+            memory_id=result.get("memory_id", task.task_id),
+            status="completed",
+            message="Memory indexed",
+        )
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed to wait for worker: {e}")
 
 
 @app.get("/search", response_model=SearchResponse, tags=["Search"])
@@ -136,49 +146,56 @@ async def search_memories(
 
     **Caching**: Results are cached in Redis with 5-minute TTL.
     """
-    start_time = time.time()
-    service = get_memory_service()
+    publisher = get_publisher()
+    reply_store = get_reply_store()
+
+    if publisher is None or reply_store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Async search not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
+        )
 
     # Parse memory types filter
     types: Optional[List[MemoryType]] = None
+    type_values: Optional[List[str]] = None
     if memory_types:
         try:
-            types = [MemoryType(t.strip()) for t in memory_types.split(",")]
+            type_values = [t.strip() for t in memory_types.split(",") if t.strip()]
+            types = [MemoryType(t) for t in type_values]
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid memory type: {e}")
 
     try:
-        memories = service.search_memories(
+        task = IndexTask.create(
             player_id=player_id,
             npc_id=npc_id,
-            query=query,
+            content=query,            # search query is stored in content
+            memory_type="search",     # ignored by worker for op=search
+            op="search",
             top_k=top_k,
-            memory_types=types,
+            memory_types=type_values,
             time_range_days=time_range_days,
         )
+        publisher.publish(task)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to queue search task: {e}")
 
-        query_time_ms = (time.time() - start_time) * 1000
+    try:
+        result = await asyncio.to_thread(reply_store.wait, task.task_id, REQUEST_TIMEOUT_SECONDS)
+        if result is None:
+            raise HTTPException(status_code=504, detail=f"Worker timeout (task_id={task.task_id})")
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=500, detail=f"Worker failed: {result}")
 
         return SearchResponse(
-            memories=[
-                MemoryResponse(
-                    id=m.id,
-                    player_id=m.player_id,
-                    npc_id=m.npc_id,
-                    memory_type=m.memory_type.value,
-                    content=m.content,
-                    importance=m.importance,
-                    emotion_tags=m.emotion_tags,
-                    timestamp=m.timestamp,
-                    game_context=m.game_context or {},
-                )
-                for m in memories
-            ],
-            total=len(memories),
-            query_time_ms=query_time_ms,
+            memories=[MemoryResponse(**m) for m in result.get("memories", [])],
+            total=int(result.get("total", 0)),
+            query_time_ms=float(result.get("query_time_ms", 0.0)),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed to wait for worker: {e}")
 
 
 @app.get("/context", response_model=ContextResponse, tags=["Search"])

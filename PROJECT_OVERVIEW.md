@@ -25,9 +25,8 @@ npc-memory-rag/
 │   ├── indexing/                 # 异步索引模块
 │   │   ├── __init__.py          # 导出索引组件
 │   │   ├── tasks.py             # IndexTask 定义与序列化
-│   │   ├── pubsub_client.py     # Pub/Sub 发布订阅封装
-│   │   ├── worker.py            # Pull 模式 Worker
-│   │   └── push_app.py          # Push 模式 Worker
+│   │   ├── pubsub_client.py     # Pub/Sub 发布封装
+│   │   └── push_app.py          # Push Worker（Pub/Sub HTTP 推送入口）
 │   │
 │   ├── memory_service.py         # Facade 兼容层 + Redis 缓存
 │   ├── es_client.py              # ES 客户端工具 + 索引迁移
@@ -52,14 +51,14 @@ npc-memory-rag/
 
 #### app.py (150 行)
 - FastAPI 主应用
-- `POST /memories`: 异步写入记忆（发布到 Pub/Sub）
-- `GET /search`: 混合检索（BM25 + Vector + RRF）
+- `POST /memories`: 入队并同步等待 worker 完成后返回（request-reply）
+- `GET /search`: 入队并同步等待 worker 查询后返回（request-reply）
 - `GET /context`: LLM 上下文准备
 - `GET /health/ready/metrics`: 健康检查和监控
 
 #### schemas.py (80 行)
 - `MemoryCreateRequest`: 写入请求模型
-- `MemoryCreateResponse`: 写入响应（task_id）
+- `MemoryCreateResponse`: 写入响应（task_id + memory_id）
 - `MemoryResponse`: 单条记忆响应
 - `SearchResponse`: 搜索结果响应
 
@@ -111,15 +110,7 @@ npc-memory-rag/
 
 #### pubsub_client.py (120 行)
 - `PubSubPublisher`: 发布任务
-- `PubSubSubscriber`: 订阅消费
-- Ack/Nack 封装
-
-#### worker.py (200 行)
-- `IndexingWorker`: Pull 模式处理器
-- 批量 embedding + Bulk ES 写入
-- 幂等性保证（task_id 作为 _id）
-- 改进的 ack 策略（全成功才 ack）
-- Prometheus 指标埋点
+- （仅保留 Publisher；消费由 Pub/Sub Push 触发 Worker）
 
 #### push_app.py (130 行)
 - FastAPI 应用
@@ -168,28 +159,6 @@ ES.index()
 返回 memory_id
 ```
 
-### 异步写入流程（Pull 模式）
-
-```
-Memory对象
-    ↓
-MemoryWriter.add_memory(async_index=True)
-    ↓
-转换为 IndexTask
-    ↓
-PubSubPublisher.publish()
-    ↓
-[Pub/Sub Topic]
-    ↓
-IndexingWorker.pull()
-    ↓
-批量 Embedding
-    ↓
-Bulk 写入 ES
-    ↓
-Ack 消息
-```
-
 ### 异步写入流程（Push 模式）
 
 ```
@@ -209,7 +178,9 @@ process_single_task()
     ↓
 Embedding + ES.index()
     ↓
-返回 2xx (ack) 或 5xx (nack)
+写入 Redis reply:{task_id}
+    ↓
+API BRPOP 等待结果并返回给客户端
 ```
 
 ### 检索流程
@@ -270,9 +241,9 @@ RRF 融合排序
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `WORKER_MODE` | pull | pull 或 push |
 | `PORT` | 8080 | Push 模式端口 |
-| `METRICS_PORT` | 8000 | 指标端口 |
+| `REQUEST_TIMEOUT_SECONDS` | 25 | API 等待 worker 返回结果的超时（秒） |
+| `REPLY_TTL_SECONDS` | 60 | Redis 回传结果 TTL（秒） |
 
 ## 依赖关系
 
@@ -303,13 +274,6 @@ indexing/push_app.py (Worker)
     ├─► es_client.py
     └─► metrics.py
 
-indexing/worker.py (Pull Worker)
-    ├─► indexing/pubsub_client.py
-    ├─► indexing/tasks.py
-    ├─► memory/models.py
-    ├─► memory/embedding.py
-    └─► metrics.py
-
 es_client.py
     └─► memory/es_schema.py
 ```
@@ -326,26 +290,20 @@ es_client.py
 - 生产阶段需要解耦和扩展
 - 通过开关灵活切换
 
-### 3. Pull vs Push 模式？
-- **Pull**：Worker 控制消费速率，适合 GKE
-- **Push**：HTTP 端点，适合 Cloud Run 自动伸缩
+### 3. 为什么采用 Push Worker？
+- Worker 通过 HTTP 端点接收 Pub/Sub 推送，天然适配 Cloud Run 自动伸缩
+- 配合 429 backpressure，满载时让 Pub/Sub 自动重试，避免把实例压垮
 
 ### 4. 如何保证幂等性？
 - 使用 `task_id` 作为 ES `_id`
 - 重复消息覆盖，不产生重复记录
 - 消息重试安全
 
-### 5. 为什么改进 ack 策略？
-- 原策略：部分成功也 ack
-- 新策略：全部成功才 ack，否则全部 nack
-- 配合 DLQ 处理失败消息
-
 ## 性能考虑
 
-### 批量处理
-- Worker 批量 pull (max_messages=10)
-- 批量 embedding (减少模型调用)
-- Bulk ES 写入 (batch_size=50)
+### 并发与限流
+- `MAX_INFLIGHT_TASKS` 限制单实例同时处理的任务数
+- 满载返回 429，触发 Pub/Sub 重试，等待 Cloud Run 扩容
 
 ### 缓存优化
 - Redis 缓存热门查询
@@ -381,7 +339,7 @@ es_client.py
 - 真实 Embedding（Qwen3）支持
 - Redis 查询结果缓存
 - Prometheus 监控指标
-- Pull/Push 双模式 Worker
+- Push Worker（Pub/Sub HTTP 推送入口）
 - DLQ 死信队列支持
 - Cloud Run 双服务部署（API + Worker）
 

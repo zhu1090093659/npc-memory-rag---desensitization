@@ -50,19 +50,18 @@ NPC Memory RAG 系统是一个基于 Elasticsearch 的游戏 NPC 记忆检索增
 
 4. **异步索引模块** (`src/indexing/`)
    - `tasks.py`: IndexTask 任务定义与 JSON 序列化
-   - `pubsub_client.py`: Google Cloud Pub/Sub 封装(Publisher/Subscriber)
-   - `worker.py`: Pull 模式 Worker，批量 embedding + bulk ES 写入，保证幂等性
+   - `pubsub_client.py`: Google Cloud Pub/Sub 封装(Publisher)
    - `push_app.py`: Push 模式 FastAPI 应用，支持 Pub/Sub HTTP 推送
 
 5. **监控模块** (`src/metrics.py`)
    - Prometheus 指标定义和采集
-   - 支持 pull 模式独立 metrics server 和 push 模式 /metrics 端点
+   - Worker 暴露 /metrics 端点，Prometheus 可直接抓取
 
 ### 数据流
 
 **同步写入**: Memory → MemoryWriter → 生成 Embedding → ES.index()
 
-**异步写入**: Memory → MemoryWriter → IndexTask → Pub/Sub Topic → Worker(批量处理) → Bulk ES 写入
+**异步写入（request-reply）**: Client → API Service → Pub/Sub Topic → Worker → ES/Redis → API Service → Client
 
 **混合检索**: 查询 → 并行(BM25 + Vector) → RRF 融合 → 记忆衰减 → 返回结果
 
@@ -116,9 +115,9 @@ Worker 使用 `task_id` 作为 ES 文档 `_id`，重复消息会覆盖而非重�
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `WORKER_MODE` | pull | 工作模式: pull 或 push |
 | `PORT` | 8080 | Push 模式 HTTP 端口 |
-| `METRICS_PORT` | 8000 | Pull 模式指标端口 |
+| `REQUEST_TIMEOUT_SECONDS` | 25 | API 等待 worker 返回结果的超时（秒） |
+| `REPLY_TTL_SECONDS` | 60 | Redis 回传结果 TTL（秒） |
 
 ## 常用命令
 
@@ -150,7 +149,6 @@ python verify_structure.py
 # Terminal 1: 启动 Worker (持续运行)
 export PUBSUB_PROJECT_ID="your-gcp-project-id"
 export PUBSUB_TOPIC="index-tasks"
-export PUBSUB_SUBSCRIPTION="index-tasks-sub"
 python examples/run_worker.py
 
 # Terminal 2: 发布索引任务
@@ -219,7 +217,7 @@ gcloud run deploy npc-memory-api \
 gcloud run deploy npc-memory-worker \
   --source . \
   --region asia-southeast1 \
-  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --set-env-vars "PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \
   --memory 4Gi \
@@ -313,11 +311,10 @@ decayed_importance = importance × e^(-λ × days)
 
 ### Worker 批量处理
 
-`src/indexing/worker.py`:
-- 批量 pull (max_messages=10)
-- 批量 embedding (减少模型调用)
-- Bulk ES 写入 (batch_size=50)
-- 错误处理: 解析失败 nack，embedding 失败不 ack
+`src/indexing/push_app.py`:
+- 并发闸门：`MAX_INFLIGHT_TASKS` + 429 backpressure（触发 Pub/Sub 重试）
+- 线程池执行阻塞 I/O：embedding + ES 写入
+- request-reply：写入 Redis `reply:{task_id}`，API 侧 BRPOP 阻塞等待后同步返回
 
 ## 测试与验证
 
@@ -362,12 +359,6 @@ memory_service.py (Facade)
             └─► indexing/pubsub_client.py
 
 indexing/push_app.py (Push Worker)
-    ├─► indexing/tasks.py
-    ├─► memory/models.py
-    └─► memory/embedding.py
-
-indexing/worker.py (Pull Worker)
-    ├─► indexing/pubsub_client.py
     ├─► indexing/tasks.py
     ├─► memory/models.py
     └─► memory/embedding.py

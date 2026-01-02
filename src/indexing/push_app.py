@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from .tasks import IndexTask
 from src.memory import Memory, MemoryType, EmbeddingService
+from src.memory.search import MemorySearcher
 from src.es_client import create_es_client
 from src.metrics import inc_worker_pulled, inc_worker_processed, observe_bulk_latency
 
@@ -56,6 +57,10 @@ generates embeddings using ModelScope Qwen3, and indexes memories to Elasticsear
 # Lazy-initialized components
 _es_client = None
 _embedder = None
+_redis_client = None
+
+# Reply channel configuration (request-reply via Redis)
+REPLY_TTL_SECONDS = int(os.getenv("REPLY_TTL_SECONDS", "60"))
 
 
 def get_es_client():
@@ -72,6 +77,43 @@ def get_embedder():
     if _embedder is None:
         _embedder = EmbeddingService()
     return _embedder
+
+
+def get_redis_client():
+    """Get or create Redis client (singleton)"""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        raise RuntimeError("REDIS_URL not set (required for request-reply)")
+
+    try:
+        import redis
+        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        _redis_client.ping()
+        return _redis_client
+    except ImportError as e:
+        raise RuntimeError("redis package not installed") from e
+    except Exception as e:
+        raise RuntimeError(f"Failed to connect to Redis: {e}") from e
+
+
+def _reply_key(task_id: str) -> str:
+    return f"reply:{task_id}"
+
+
+def write_reply(task_id: str, payload: dict):
+    """
+    Write reply payload to Redis so the API service can BRPOP it.
+    Uses a list to allow BRPOP blocking wait.
+    """
+    client = get_redis_client()
+    key = _reply_key(task_id)
+    data = json.dumps(payload, ensure_ascii=False)
+    client.lpush(key, data)
+    client.expire(key, REPLY_TTL_SECONDS)
 
 
 class PubSubMessage(BaseModel):
@@ -137,7 +179,56 @@ def _sync_process_task(task: IndexTask) -> bool:
     import time
 
     try:
-        # Convert to Memory
+        op = (task.op or "index").lower()
+
+        if op == "search":
+            es = get_es_client()
+            embedder = get_embedder()
+            index_alias = os.getenv("INDEX_ALIAS", "npc_memories")
+            searcher = MemorySearcher(es, embedder, index_alias=index_alias)
+
+            types = None
+            if task.memory_types:
+                try:
+                    types = [MemoryType(t) for t in task.memory_types]
+                except Exception as e:
+                    raise ValueError(f"Invalid memory_types: {e}") from e
+
+            start_time = time.time()
+            memories = searcher.search_memories(
+                player_id=task.player_id,
+                npc_id=task.npc_id,
+                query=task.content,
+                top_k=task.top_k or 5,
+                memory_types=types,
+                time_range_days=task.time_range_days,
+            )
+            query_time_ms = (time.time() - start_time) * 1000
+
+            write_reply(task.task_id, {
+                "status": "ok",
+                "op": "search",
+                "task_id": task.task_id,
+                "total": len(memories),
+                "query_time_ms": query_time_ms,
+                "memories": [
+                    {
+                        "id": m.id,
+                        "player_id": m.player_id,
+                        "npc_id": m.npc_id,
+                        "memory_type": m.memory_type.value,
+                        "content": m.content,
+                        "importance": m.importance,
+                        "emotion_tags": m.emotion_tags,
+                        "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                        "game_context": m.game_context or {},
+                    }
+                    for m in memories
+                ],
+            })
+            return True
+
+        # Default: op=index
         memory = Memory(
             id=task.task_id,
             player_id=task.player_id,
@@ -150,11 +241,9 @@ def _sync_process_task(task: IndexTask) -> bool:
             game_context=task.game_context
         )
 
-        # Generate embedding (blocking I/O)
         embedder = get_embedder()
         memory.content_vector = embedder.embed(memory.content)
 
-        # Index to ES (blocking I/O)
         es = get_es_client()
         doc = memory.to_es_doc()
 
@@ -166,6 +255,13 @@ def _sync_process_task(task: IndexTask) -> bool:
             body={k: v for k, v in doc.items() if not k.startswith("_")}
         )
         observe_bulk_latency(time.time() - start_time)
+
+        write_reply(task.task_id, {
+            "status": "ok",
+            "op": "index",
+            "task_id": task.task_id,
+            "memory_id": task.task_id,
+        })
 
         return True
 

@@ -1,22 +1,21 @@
 # 异步索引构建指南
 
-本文档说明如何使用异步索引功能（Pub/Sub Push + Cloud Run 自动伸缩）。
+本文档说明如何使用队列驱动的异步处理（Pub/Sub Push + Cloud Run 自动伸缩），并通过 Redis 实现 request-reply，让客户端请求可以同步拿到结果。
 
 ## 架构概览
 
 ```
-写入入口 (add_memory)
+写入/查询入口 (API)
     │
-    ├─► [同步模式] 直接写入 ES
-    │
-    └─► [异步模式] 发布到 Pub/Sub Topic
+    └─► 发布到 Pub/Sub Topic（task_id 作为关联 ID）
             │
             └─► Pub/Sub Push 投递到 Worker
                     │
                     ├─► 并发闸门检查（满载返回 429）
-                    ├─► Embedding 生成
+                    ├─► 执行 index 或 search
                     ├─► 写入 ES
-                    └─► 返回 2xx (Ack) 或 非2xx (重试)
+                    ├─► 写入 Redis reply:{task_id}
+                    └─► API 侧 BRPOP 阻塞等待并返回给客户端
 ```
 
 ## 核心机制
@@ -36,6 +35,11 @@ export ES_API_KEY="your-api-key"           # Elastic Cloud 认证
 
 # Embedding
 export MODELSCOPE_API_KEY="your-key"
+
+# request-reply (required)
+export REDIS_URL="redis://localhost:6379/0"
+export REQUEST_TIMEOUT_SECONDS="25"         # API wait timeout
+export REPLY_TTL_SECONDS="60"               # reply TTL
 
 # 并发控制
 export MAX_INFLIGHT_TASKS="4"              # 单实例最大并发任务数
@@ -279,7 +283,7 @@ gcloud pubsub subscriptions pull index-tasks-dlq-sub --format=json
 scrape_configs:
   - job_name: 'npc-memory-worker'
     static_configs:
-      - targets: ['localhost:8000']  # Pull 模式
+      - targets: ['localhost:8080']  # Worker /metrics
     # 或 Cloud Run 服务
     # - targets: ['worker.run.app']
 ```

@@ -45,9 +45,10 @@ class MemoryCreateRequest(BaseModel):
 
 class MemoryCreateResponse(BaseModel):
     """Response model for memory creation"""
-    task_id: str = Field(..., description="Async task ID for tracking")
-    status: str = Field("queued", description="Task status")
-    message: str = Field("Memory queued for indexing", description="Status message")
+    task_id: str = Field(..., description="Task ID (correlation ID)")
+    memory_id: str = Field(..., description="Indexed memory ID")
+    status: str = Field("completed", description="Processing status")
+    message: str = Field("Memory indexed", description="Status message")
 
 
 class MemoryResponse(BaseModel):

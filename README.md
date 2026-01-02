@@ -20,8 +20,7 @@ npc-memory-rag/
 │   ├── indexing/            # 异步索引模块
 │   │   ├── tasks.py         # 索引任务定义
 │   │   ├── pubsub_client.py # Pub/Sub 封装
-│   │   ├── worker.py        # Pull 模式 Worker
-│   │   └── push_app.py      # Push 模式 Worker
+│   │   └── push_app.py      # Push Worker（Pub/Sub HTTP 推送入口）
 │   ├── memory_service.py    # Facade 兼容层
 │   ├── es_client.py         # ES 客户端工具
 │   └── metrics.py           # Prometheus 指标
@@ -47,15 +46,15 @@ npc-memory-rag/
 
 ### 3. 异步索引（Pub/Sub）
 
-- **Pull 模式**：Worker 轮询消费，适合 GKE
-- **Push 模式**：FastAPI HTTP 端点，适合 Cloud Run
+- **Push Worker**：FastAPI HTTP 端点（`POST /pubsub/push`），适合 Cloud Run 自动伸缩
+- **Request-Reply（同步返回）**：API 入队后通过 Redis 阻塞等待 worker 结果，然后在同一条 HTTP 请求里返回给客户端
 - 死信队列（DLQ）支持
 
 ### 4. REST API 服务
 
 - 独立的 FastAPI 服务，支持 OpenAPI 文档
-- `POST /memories` - 异步写入记忆
-- `GET /search` - 混合检索
+- `POST /memories` - 入队并同步等待 worker 完成后返回（request-reply）
+- `GET /search` - 入队并同步等待 worker 查询后返回（request-reply）
 - `GET /context` - LLM 上下文准备
 
 ### 5. 缓存与监控
@@ -132,11 +131,8 @@ results = service.search_memories(
 ### 6. 异步模式（Worker）
 
 ```bash
-# Pull 模式
+# Push Worker（Pub/Sub Push → Worker）
 python examples/run_worker.py
-
-# Push 模式（FastAPI）
-python examples/run_worker.py --push
 ```
 
 详见 [ASYNC_INDEXING.md](ASYNC_INDEXING.md)
@@ -164,16 +160,16 @@ python examples/run_worker.py --push
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `REDIS_URL` | - | Redis 地址 |
+| `REDIS_URL` | - | Redis 地址（查询缓存 + request-reply 回传通道） |
 | `CACHE_TTL_SECONDS` | 300 | 缓存过期时间 |
 
 ### Worker 配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `WORKER_MODE` | pull | pull 或 push |
 | `PORT` | 8080 | Push 模式端口 |
-| `METRICS_PORT` | 8000 | 指标端口 |
+| `REQUEST_TIMEOUT_SECONDS` | 25 | API 等待 worker 返回结果的超时（秒） |
+| `REPLY_TTL_SECONDS` | 60 | Redis 回传结果的 TTL（秒） |
 
 ## Cloud Run 部署 (新加坡 asia-southeast1)
 
@@ -225,7 +221,7 @@ open https://npc-memory-api-257652255998.asia-southeast1.run.app/docs
 
 ## 文档
 
-- [异步索引指南](ASYNC_INDEXING.md) - Pull/Push 模式、DLQ、Cloud Run
+- [异步索引指南](ASYNC_INDEXING.md) - Push Worker、request-reply、DLQ、Cloud Run
 - [项目总览](PROJECT_OVERVIEW.md) - 架构设计、数据流
 - [重构记录](REFACTORING_SUMMARY.md) - 模块化过程
 

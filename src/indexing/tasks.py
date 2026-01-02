@@ -4,7 +4,7 @@ Index task definition and serialization
 
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 import uuid
 
@@ -12,8 +12,11 @@ import uuid
 @dataclass
 class IndexTask:
     """
-    Index task for async processing
-    Contains dialogue/event log to be indexed
+    Index task for async processing.
+
+    This task is used for both:
+    - op=index: generate embedding and index into Elasticsearch
+    - op=search: execute hybrid search and return results
     """
     task_id: str
     player_id: str
@@ -21,9 +24,14 @@ class IndexTask:
     content: str
     memory_type: str
     timestamp: str
+    op: str = "index"  # index | search
     importance: float = 0.5
     emotion_tags: list = None
     game_context: dict = None
+    # Search-only fields (ignored for op=index)
+    top_k: int = 5
+    memory_types: Optional[List[str]] = None
+    time_range_days: Optional[int] = None
 
     def __post_init__(self):
         """Initialize default values"""
@@ -39,10 +47,15 @@ class IndexTask:
         npc_id: str,
         content: str,
         memory_type: str,
+        op: str = "index",
         importance: float = 0.5,
         emotion_tags: list = None,
         game_context: dict = None,
-        timestamp: datetime = None
+        timestamp: datetime = None,
+        # Search-only fields (ignored for op=index)
+        top_k: int = 5,
+        memory_types: Optional[List[str]] = None,
+        time_range_days: Optional[int] = None,
     ) -> "IndexTask":
         """
         Factory method to create index task with auto-generated ID
@@ -57,9 +70,13 @@ class IndexTask:
             content=content,
             memory_type=memory_type,
             timestamp=timestamp_str,
+            op=op,
             importance=importance,
             emotion_tags=emotion_tags or [],
-            game_context=game_context or {}
+            game_context=game_context or {},
+            top_k=top_k,
+            memory_types=memory_types,
+            time_range_days=time_range_days,
         )
 
     def to_json(self) -> str:
