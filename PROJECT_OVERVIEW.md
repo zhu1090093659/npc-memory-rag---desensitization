@@ -8,6 +8,12 @@ npc-memory-rag/
 ├── src/                          # 源代码
 │   ├── __init__.py              # 包初始化
 │   │
+│   ├── api/                      # REST API 服务层
+│   │   ├── __init__.py          # 导出 app
+│   │   ├── app.py               # FastAPI 主应用
+│   │   ├── schemas.py           # Pydantic 请求/响应模型
+│   │   └── dependencies.py      # 依赖注入（单例模式）
+│   │
 │   ├── memory/                   # 核心记忆模块
 │   │   ├── __init__.py          # 导出所有记忆组件
 │   │   ├── models.py            # 数据模型 (Memory, MemoryType, MemoryContext)
@@ -21,32 +27,46 @@ npc-memory-rag/
 │   │   ├── tasks.py             # IndexTask 定义与序列化
 │   │   ├── pubsub_client.py     # Pub/Sub 发布订阅封装
 │   │   ├── worker.py            # Pull 模式 Worker
-│   │   └── push_app.py          # Push 模式 FastAPI 应用
+│   │   └── push_app.py          # Push 模式 Worker
 │   │
 │   ├── memory_service.py         # Facade 兼容层 + Redis 缓存
 │   ├── es_client.py              # ES 客户端工具 + 索引迁移
 │   └── metrics.py                # Prometheus 指标定义
 │
 ├── examples/                     # 示例脚本
-│   ├── init_es.py               # 初始化 ES 索引
-│   ├── publish_task.py          # 发布任务示例
-│   ├── run_worker.py            # 运行 Worker（pull/push）
-│   └── rollover_index.py        # 索引迁移工具
-│
 ├── demo.py                       # 内存算法演示（无依赖）
+├── Dockerfile                    # 容器化部署
 ├── docker-compose.yml            # ES + Redis + Prometheus
 ├── prometheus.yml                # Prometheus 配置
 ├── requirements.txt              # 依赖清单
-├── verify_structure.py           # 结构验证脚本
 │
 ├── README.md                     # 项目说明
 ├── ASYNC_INDEXING.md            # 异步索引指南
-├── REFACTORING_SUMMARY.md       # 重构总结
 ├── CLAUDE.md                    # Claude Code 指引
 └── PROJECT_OVERVIEW.md          # 本文件
 ```
 
 ## 模块说明
+
+### 0. src/api - REST API 服务层
+
+#### app.py (150 行)
+- FastAPI 主应用
+- `POST /memories`: 异步写入记忆（发布到 Pub/Sub）
+- `GET /search`: 混合检索（BM25 + Vector + RRF）
+- `GET /context`: LLM 上下文准备
+- `GET /health/ready/metrics`: 健康检查和监控
+
+#### schemas.py (80 行)
+- `MemoryCreateRequest`: 写入请求模型
+- `MemoryCreateResponse`: 写入响应（task_id）
+- `MemoryResponse`: 单条记忆响应
+- `SearchResponse`: 搜索结果响应
+
+#### dependencies.py (50 行)
+- 依赖注入，单例模式
+- `get_memory_service()`: NPCMemoryService
+- `get_publisher()`: PubSubPublisher
 
 ### 1. src/memory - 核心记忆模块
 
@@ -257,6 +277,13 @@ RRF 融合排序
 ## 依赖关系
 
 ```
+api/app.py (REST API)
+    ├─► api/schemas.py
+    ├─► api/dependencies.py
+    │       ├─► memory_service.py
+    │       └─► indexing/pubsub_client.py
+    └─► indexing/tasks.py
+
 memory_service.py (Facade)
     ├─► memory/search.py
     │       └─► memory/models.py
@@ -269,18 +296,18 @@ memory_service.py (Facade)
     │
     └─► metrics.py
 
-indexing/worker.py
-    ├─► indexing/pubsub_client.py
-    ├─► indexing/tasks.py
-    ├─► memory/models.py
-    ├─► memory/embedding.py
-    └─► metrics.py
-
-indexing/push_app.py
+indexing/push_app.py (Worker)
     ├─► indexing/tasks.py
     ├─► memory/models.py
     ├─► memory/embedding.py
     ├─► es_client.py
+    └─► metrics.py
+
+indexing/worker.py (Pull Worker)
+    ├─► indexing/pubsub_client.py
+    ├─► indexing/tasks.py
+    ├─► memory/models.py
+    ├─► memory/embedding.py
     └─► metrics.py
 
 es_client.py
@@ -350,11 +377,20 @@ es_client.py
 ## 总结
 
 本项目通过模块化设计，实现了：
+- REST API 服务（FastAPI + OpenAPI）
 - 真实 Embedding（Qwen3）支持
 - Redis 查询结果缓存
 - Prometheus 监控指标
 - Pull/Push 双模式 Worker
 - DLQ 死信队列支持
-- Cloud Run 部署就绪
+- Cloud Run 双服务部署（API + Worker）
 
 符合最小化改动、不过度设计、保持简洁的原则。
+
+## 已部署服务
+
+| 服务 | URL |
+|------|-----|
+| API Service | https://npc-memory-api-257652255998.asia-southeast1.run.app |
+| Worker Service | https://npc-memory-worker-257652255998.asia-southeast1.run.app |
+| OpenAPI 文档 | https://npc-memory-api-257652255998.asia-southeast1.run.app/docs |

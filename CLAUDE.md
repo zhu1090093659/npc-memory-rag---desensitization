@@ -405,9 +405,3 @@ es_client.py
 6. **死信队列**: 已优化 ack/nack 策略，配合 DLQ 配置指南
 7. **Cloud Run 部署**: 已提供 API + Worker 双服务部署指南和自动伸缩说明
 
-## 下一步优化方向
-
-1. **向量维度迁移**: 使用 rollover 工具切换到更高维度模型
-2. **批量 reindex**: 历史数据重新 embedding 迁移工具
-3. **Grafana Dashboard**: 预置监控面板模板
-4. **负载测试**: 压测脚本和性能基线

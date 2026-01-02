@@ -7,6 +7,10 @@
 ```
 npc-memory-rag/
 ├── src/
+│   ├── api/                 # REST API 服务层
+│   │   ├── app.py           # FastAPI 主应用
+│   │   ├── schemas.py       # Pydantic 数据模型
+│   │   └── dependencies.py  # 依赖注入
 │   ├── memory/              # 核心记忆模块
 │   │   ├── models.py        # 数据模型
 │   │   ├── embedding.py     # Embedding 服务（Qwen3/stub）
@@ -17,18 +21,14 @@ npc-memory-rag/
 │   │   ├── tasks.py         # 索引任务定义
 │   │   ├── pubsub_client.py # Pub/Sub 封装
 │   │   ├── worker.py        # Pull 模式 Worker
-│   │   └── push_app.py      # Push 模式 FastAPI
+│   │   └── push_app.py      # Push 模式 Worker
 │   ├── memory_service.py    # Facade 兼容层
 │   ├── es_client.py         # ES 客户端工具
 │   └── metrics.py           # Prometheus 指标
 ├── examples/                # 示例脚本
-│   ├── init_es.py          # 初始化 ES 索引
-│   ├── publish_task.py     # 发布任务示例
-│   ├── run_worker.py       # 运行 Worker（pull/push）
-│   └── rollover_index.py   # 索引迁移工具
 ├── demo.py                  # 算法演示（无依赖）
-├── docker-compose.yml       # ES + Redis + Prometheus
-└── ASYNC_INDEXING.md       # 异步索引指南
+├── Dockerfile               # 容器化部署
+└── docker-compose.yml       # ES + Redis + Prometheus
 ```
 
 ## 核心特性
@@ -51,7 +51,14 @@ npc-memory-rag/
 - **Push 模式**：FastAPI HTTP 端点，适合 Cloud Run
 - 死信队列（DLQ）支持
 
-### 4. 缓存与监控
+### 4. REST API 服务
+
+- 独立的 FastAPI 服务，支持 OpenAPI 文档
+- `POST /memories` - 异步写入记忆
+- `GET /search` - 混合检索
+- `GET /context` - LLM 上下文准备
+
+### 5. 缓存与监控
 
 - Redis 查询结果缓存
 - Prometheus 指标采集
@@ -170,19 +177,26 @@ python examples/run_worker.py --push
 
 ## Cloud Run 部署 (新加坡 asia-southeast1)
 
+### 已部署服务
+
+| 服务 | URL | 说明 |
+|------|-----|------|
+| API Service | https://npc-memory-api-257652255998.asia-southeast1.run.app | REST API |
+| Worker Service | https://npc-memory-worker-257652255998.asia-southeast1.run.app | 异步索引处理 |
+
+### API 使用示例
+
 ```bash
-# 部署 Push Worker
-gcloud run deploy npc-memory-worker \
-  --source . \
-  --region asia-southeast1 \
-  --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
-  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
-  --cpu 2 \
-  --memory 4Gi \
-  --timeout 60s \
-  --concurrency 10 \
-  --max-instances 10 \
-  --allow-unauthenticated
+# 写入记忆
+curl -X POST https://npc-memory-api-257652255998.asia-southeast1.run.app/memories \
+  -H "Content-Type: application/json" \
+  -d '{"player_id":"player_1","npc_id":"npc_1","memory_type":"dialogue","content":"测试内容","importance":0.8}'
+
+# 搜索记忆
+curl "https://npc-memory-api-257652255998.asia-southeast1.run.app/search?player_id=player_1&npc_id=npc_1&query=测试"
+
+# 查看 OpenAPI 文档
+open https://npc-memory-api-257652255998.asia-southeast1.run.app/docs
 ```
 
 详见 [CLAUDE.md](CLAUDE.md) 和 [ASYNC_INDEXING.md](ASYNC_INDEXING.md) 中的部署章节。
@@ -198,7 +212,8 @@ gcloud run deploy npc-memory-worker \
 
 ## 已完成功能
 
-- [x] 模块化设计（memory/indexing）
+- [x] 模块化设计（api/memory/indexing）
+- [x] REST API 服务（FastAPI + OpenAPI）
 - [x] 混合检索（BM25 + Vector + RRF）
 - [x] 真实 Embedding（Qwen3）
 - [x] 同步/异步写入模式
@@ -206,7 +221,7 @@ gcloud run deploy npc-memory-worker \
 - [x] Prometheus 监控
 - [x] Push 模式 Worker
 - [x] DLQ 支持
-- [x] Cloud Run 部署指南
+- [x] Cloud Run 双服务部署（API + Worker）
 
 ## 文档
 
