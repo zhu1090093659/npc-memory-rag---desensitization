@@ -168,13 +168,13 @@ python examples/run_worker.py --push
 | `PORT` | 8080 | Push 模式端口 |
 | `METRICS_PORT` | 8000 | 指标端口 |
 
-## Cloud Run 部署 (香港 asia-east2)
+## Cloud Run 部署 (新加坡 asia-southeast1)
 
 ```bash
 # 部署 Push Worker
 gcloud run deploy npc-memory-worker \
   --source . \
-  --region asia-east2 \
+  --region asia-southeast1 \
   --set-env-vars "WORKER_MODE=push,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
   --cpu 2 \

@@ -5,7 +5,7 @@ Usage:
     python examples/live_demo.py
 
 This script connects to:
-    - Cloud Run (asia-east2): Push Worker service
+    - Cloud Run (asia-southeast1): Push Worker service
     - Elastic Cloud: Vector database
     - Pub/Sub: Message queue
     - ModelScope: Qwen3 embedding
@@ -29,7 +29,7 @@ os.environ.setdefault("EMBEDDING_MODEL", "qwen3-embedding-8b")
 os.environ.setdefault("INDEX_VECTOR_DIMS", "1024")
 # GCP Configuration
 os.environ.setdefault("PUBSUB_PROJECT_ID", "npc-memory-rag")
-os.environ.setdefault("CLOUD_RUN_URL", "https://npc-memory-worker-257652255998.asia-east2.run.app")
+os.environ.setdefault("CLOUD_RUN_URL", "https://npc-memory-worker-257652255998.asia-southeast1.run.app")
 # =============================================================================
 
 # Add project root to path
@@ -229,7 +229,7 @@ def main():
 ================================================================================
                     NPC Memory RAG - Live Cloud Demo
 ================================================================================
-    Cloud Run (asia-east2) + Pub/Sub + Elastic Cloud + ModelScope Qwen3
+    Cloud Run (asia-southeast1) + Pub/Sub + Elastic Cloud + ModelScope Qwen3
 ================================================================================
 """)
 

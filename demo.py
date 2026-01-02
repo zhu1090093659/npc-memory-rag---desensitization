@@ -244,7 +244,7 @@ class NPCMemoryServiceDemo:
         记忆衰减：模拟人类记忆遗忘曲线
         decayed = importance × e^(-λ × days)
         """
-        decay_lambda = 0.02
+        decay_lambda = 0.01
         now = datetime.now()
         
         for m in memories:
@@ -511,7 +511,7 @@ def main():
 └── docker-compose.yml        - 本地 ES 集群配置
 
 ☁️  云端部署（已上线）：
-├── Cloud Run (asia-east2)    - Push Worker 服务
+├── Cloud Run (asia-southeast1)    - Push Worker 服务
 ├── Pub/Sub                   - 消息队列 + DLQ
 ├── Elastic Cloud             - 向量数据库
 └── Secret Manager            - 密钥管理

@@ -8,27 +8,53 @@ NPC Memory RAG 系统是一个基于 Elasticsearch 的游戏 NPC 记忆检索增
 
 ## 核心架构
 
-### 三层架构设计
+### 四层架构设计
 
-1. **Facade 层** (`src/memory_service.py`)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Cloud Run (asia-southeast1)                  │
+├─────────────────────────────┬───────────────────────────────────┤
+│      API Service            │        Worker Service             │
+│   (npc-memory-api)          │     (npc-memory-worker)           │
+│                             │                                   │
+│   POST /memories  ──────────┼──► Pub/Sub ──► POST /pubsub/push │
+│   GET  /search    ◄─────────┼────────────────► ES 直接查询      │
+│   GET  /context             │        GET /health                │
+│   GET  /health              │        GET /ready                 │
+│   GET  /metrics             │        GET /metrics               │
+└─────────────────────────────┴───────────────────────────────────┘
+                                        │
+                                        ▼
+                              ┌─────────────────┐
+                              │  Elasticsearch  │
+                              │  (混合检索)      │
+                              └─────────────────┘
+```
+
+1. **API 层** (`src/api/`)
+   - `app.py`: FastAPI REST API 服务，提供写入和查询接口
+   - `schemas.py`: Pydantic 请求/响应模型定义
+   - `dependencies.py`: 依赖注入，单例模式管理共享资源
+
+2. **Facade 层** (`src/memory_service.py`)
    - `NPCMemoryService` 作为统一入口，保持向后兼容
    - 组合所有子模块功能
    - 集成可选的 Redis 缓存
 
-2. **核心记忆模块** (`src/memory/`)
+3. **核心记忆模块** (`src/memory/`)
    - `models.py`: 数据模型定义(Memory, MemoryType, MemoryContext)
    - `embedding.py`: Embedding 服务接口，支持 ModelScope Qwen3 或 stub 回退
    - `es_schema.py`: Elasticsearch 索引配置(30 分片, HNSW 向量索引, 可配置向量维度)
    - `search.py`: **核心检索逻辑** - BM25 + Vector 并行搜索 + RRF 融合 + 记忆衰减
    - `write.py`: 写入操作，支持同步/异步模式切换
 
-3. **异步索引模块** (`src/indexing/`)
+4. **异步索引模块** (`src/indexing/`)
    - `tasks.py`: IndexTask 任务定义与 JSON 序列化
    - `pubsub_client.py`: Google Cloud Pub/Sub 封装(Publisher/Subscriber)
    - `worker.py`: Pull 模式 Worker，批量 embedding + bulk ES 写入，保证幂等性
    - `push_app.py`: Push 模式 FastAPI 应用，支持 Pub/Sub HTTP 推送
 
-4. **监控模块** (`src/metrics.py`)
+5. **监控模块** (`src/metrics.py`)
    - Prometheus 指标定义和采集
    - 支持 pull 模式独立 metrics server 和 push 模式 /metrics 端点
 
@@ -68,12 +94,16 @@ Worker 使用 `task_id` 作为 ES 文档 `_id`，重复消息会覆盖而非重�
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `EMBEDDING_PROVIDER` | modelscope | 提供者: modelscope 或 stub |
-| `MODELSCOPE_API_KEY` | (必需) | ModelScope API 密钥 |
-| `MODELSCOPE_BASE_URL` | https://api-inference.modelscope.cn/v1 | API 地址 |
-| `EMBEDDING_MODEL` | Qwen/Qwen3-Embedding-8B | 模型名称 |
+| `EMBEDDING_PROVIDER` | openai_compatible | 提供者: openai_compatible 或 stub |
+| `EMBEDDING_API_KEY` | (必需) | Embedding API 密钥 |
+| `EMBEDDING_BASE_URL` | https://api.bltcy.ai/v1 | API 地址 |
+| `EMBEDDING_MODEL` | qwen3-embedding-8b | 模型名称 |
 | `INDEX_VECTOR_DIMS` | 1024 | 向量维度 |
-| `EMBEDDING_CACHE_ENABLED` | false | 内存缓存开关 |
+| `EMBEDDING_CACHE_ENABLED` | false | 缓存开关 |
+| `EMBEDDING_TIMEOUT` | 30 | API 超时（秒） |
+| `EMBEDDING_MAX_RETRIES` | 3 | 最大重试次数 |
+| `MODELSCOPE_API_KEY` | (兼容) | 旧版环境变量，向后兼容 |
+| `MODELSCOPE_BASE_URL` | (兼容) | 旧版环境变量，向后兼容 |
 
 ### Redis 缓存配置
 
@@ -170,7 +200,22 @@ for secret in es-url es-api-key modelscope-api-key; do
     --role="roles/secretmanager.secretAccessor" --quiet
 done
 
-# 5. 部署 Cloud Run 服务 (Push Worker)
+# 5. 部署 API Service (接收写入和查询请求)
+gcloud run deploy npc-memory-api \
+  --source . \
+  --region asia-southeast1 \
+  --set-env-vars "INDEX_ASYNC_ENABLED=true,PUBSUB_PROJECT_ID=$(gcloud config get-value project)" \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest" \
+  --command "uvicorn" \
+  --args "src.api.app:app,--host,0.0.0.0,--port,8080" \
+  --cpu 1 \
+  --memory 1Gi \
+  --timeout 30s \
+  --concurrency 80 \
+  --max-instances 10 \
+  --allow-unauthenticated
+
+# 6. 部署 Worker Service (异步处理索引任务)
 gcloud run deploy npc-memory-worker \
   --source . \
   --region asia-southeast1 \
@@ -183,7 +228,7 @@ gcloud run deploy npc-memory-worker \
   --max-instances 10 \
   --allow-unauthenticated
 
-# 6. 创建 Pub/Sub 资源
+# 7. 创建 Pub/Sub 资源
 gcloud pubsub topics create index-tasks
 gcloud pubsub topics create index-tasks-dlq
 gcloud pubsub subscriptions create index-tasks-push \
@@ -195,7 +240,7 @@ gcloud pubsub subscriptions create index-tasks-push \
 ```
 
 **资源清单**:
-- Cloud Run Service: `npc-memory-worker`
+- Cloud Run Services: `npc-memory-api`, `npc-memory-worker`
 - Region: `asia-southeast1` (新加坡，与 ES 同区域)
 - Secrets: `es-url`, `es-api-key`, `modelscope-api-key`
 - Pub/Sub Topic: `index-tasks`, `index-tasks-dlq`
@@ -203,12 +248,24 @@ gcloud pubsub subscriptions create index-tasks-push \
 
 **验证端点**:
 ```bash
-# 健康检查
-curl https://<service-url>/health   # {"status":"healthy"}
-curl https://<service-url>/ready    # {"status":"ready"} (验证 ES 连接)
-curl https://<service-url>/metrics  # Prometheus 指标
+# API Service 健康检查
+curl https://<api-service-url>/health   # {"status":"healthy"}
+curl https://<api-service-url>/ready    # {"status":"ready"}
+curl https://<api-service-url>/docs     # OpenAPI 文档
 
-# 发布测试任务
+# 通过 API 写入记忆 (异步)
+curl -X POST https://<api-service-url>/memories \
+  -H "Content-Type: application/json" \
+  -d '{"player_id":"player_1","npc_id":"npc_1","memory_type":"dialogue","content":"测试记忆内容","importance":0.8}'
+
+# 通过 API 搜索记忆
+curl "https://<api-service-url>/search?player_id=player_1&npc_id=npc_1&query=测试"
+
+# Worker Service 健康检查
+curl https://<worker-service-url>/health
+curl https://<worker-service-url>/ready
+
+# 直接发布 Pub/Sub 任务 (绕过 API)
 gcloud pubsub topics publish index-tasks --message='{"task_id":"test-001","player_id":"player_1","npc_id":"npc_1","memory_type":"dialogue","content":"Test memory content","importance":0.8,"emotion_tags":["happy"],"timestamp":"2025-01-01T00:00:00","game_context":{}}'
 ```
 
@@ -244,7 +301,7 @@ RRF(doc) = Σ 1 / (k + rank_i(doc))
 decayed_importance = importance × e^(-λ × days)
 ```
 
-默认 λ=0.02，模拟人类遗忘曲线。
+默认 λ=0.01，模拟人类遗忘曲线。
 
 ### Elasticsearch 优化
 
@@ -287,6 +344,13 @@ open http://localhost:5601
 ## 模块依赖关系
 
 ```
+api/app.py (REST API)
+    ├─► api/schemas.py
+    ├─► api/dependencies.py
+    │       ├─► memory_service.py
+    │       └─► indexing/pubsub_client.py
+    └─► indexing/tasks.py
+
 memory_service.py (Facade)
     ├─► memory/search.py
     │       └─► memory/models.py
@@ -297,7 +361,12 @@ memory_service.py (Facade)
             └─► indexing/tasks.py
             └─► indexing/pubsub_client.py
 
-indexing/worker.py
+indexing/push_app.py (Push Worker)
+    ├─► indexing/tasks.py
+    ├─► memory/models.py
+    └─► memory/embedding.py
+
+indexing/worker.py (Pull Worker)
     ├─► indexing/pubsub_client.py
     ├─► indexing/tasks.py
     ├─► memory/models.py
@@ -328,12 +397,13 @@ es_client.py
 
 ## 已完成功能
 
-1. **真实 Embedding**: 已集成 ModelScope Qwen3-Embedding-8B，支持自动回退 stub
-2. **Redis 缓存**: 已实现查询结果缓存，支持 TTL 和版本控制
-3. **监控集成**: 已集成 Prometheus 指标，支持缓存/embedding/worker 监控
-4. **Push 模式**: 已实现 FastAPI Push Worker，支持 Pub/Sub HTTP 推送
-5. **死信队列**: 已优化 ack/nack 策略，配合 DLQ 配置指南
-6. **Cloud Run 部署**: 已提供完整部署指南和自动伸缩说明
+1. **REST API 服务**: 独立的 FastAPI 服务，提供写入/查询/上下文接口，支持 OpenAPI 文档
+2. **真实 Embedding**: 已集成 ModelScope Qwen3-Embedding-8B，支持自动回退 stub
+3. **Redis 缓存**: 已实现查询结果缓存，支持 TTL 和版本控制
+4. **监控集成**: 已集成 Prometheus 指标，支持缓存/embedding/worker 监控
+5. **Push 模式**: 已实现 FastAPI Push Worker，支持 Pub/Sub HTTP 推送
+6. **死信队列**: 已优化 ack/nack 策略，配合 DLQ 配置指南
+7. **Cloud Run 部署**: 已提供 API + Worker 双服务部署指南和自动伸缩说明
 
 ## 下一步优化方向
 
