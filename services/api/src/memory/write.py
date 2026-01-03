@@ -8,9 +8,10 @@ from typing import List, Optional
 from elasticsearch.helpers import bulk, BulkIndexError
 
 from .models import Memory
+from src import get_env, get_env_bool
 
 # Elastic Cloud Serverless does not support routing parameter
-ES_ROUTING_ENABLED = os.getenv("ES_ROUTING_ENABLED", "false").lower() == "true"
+ES_ROUTING_ENABLED = get_env_bool("ES_ROUTING_ENABLED")
 
 
 class MemoryWriter:
@@ -20,14 +21,14 @@ class MemoryWriter:
         self,
         es_client,
         embedding_service,
-        index_alias: str = "npc_memories",
+        index_alias: str = None,
         pubsub_publisher=None
     ):
         self.es = es_client
         self.embedder = embedding_service
-        self.index_alias = index_alias
+        self.index_alias = index_alias or get_env("INDEX_ALIAS")
         self.publisher = pubsub_publisher
-        self.async_enabled = os.getenv("INDEX_ASYNC_ENABLED", "false").lower() == "true"
+        self.async_enabled = get_env_bool("INDEX_ASYNC_ENABLED")
 
     def add_memory(self, memory: Memory, async_index: bool = None) -> str:
         """

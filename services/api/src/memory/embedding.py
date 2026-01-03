@@ -10,28 +10,30 @@ import hashlib
 import threading
 from typing import List, Optional
 
+from src import get_env, get_env_bool, get_env_int
+
 
 # Environment variable configs
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai_compatible")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://your-embedding-api.com/v1")
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-8b")
-# qwen3-embedding-8b outputs 1024 dimensions
-INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "1024"))
+EMBEDDING_PROVIDER = get_env("EMBEDDING_PROVIDER")
+EMBEDDING_BASE_URL = get_env("EMBEDDING_BASE_URL")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
+EMBEDDING_MODEL = get_env("EMBEDDING_MODEL")
+INDEX_VECTOR_DIMS = get_env_int("INDEX_VECTOR_DIMS")
+EMBEDDING_ALLOW_STUB = get_env_bool("EMBEDDING_ALLOW_STUB")
 
 # Backward compatibility aliases
-MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL", EMBEDDING_BASE_URL)
-MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY", EMBEDDING_API_KEY)
+MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL") or EMBEDDING_BASE_URL
+MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY") or (EMBEDDING_API_KEY or "")
 
 # Embedding cache settings
-EMBEDDING_CACHE_ENABLED = os.getenv("EMBEDDING_CACHE_ENABLED", "false").lower() == "true"
-REDIS_URL = os.getenv("REDIS_URL", "")
+EMBEDDING_CACHE_ENABLED = get_env_bool("EMBEDDING_CACHE_ENABLED")
+REDIS_URL = os.getenv("REDIS_URL")
 EMBEDDING_CACHE_PREFIX = "emb:v1:"
 EMBEDDING_CACHE_TTL = 86400 * 7  # 7 days TTL for embedding vectors
 
 # Retry settings
-EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "30"))
-EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+EMBEDDING_TIMEOUT = get_env_int("EMBEDDING_TIMEOUT")
+EMBEDDING_MAX_RETRIES = get_env_int("EMBEDDING_MAX_RETRIES")
 
 
 class EmbeddingService:
@@ -79,8 +81,10 @@ class EmbeddingService:
         # Check both new and legacy env var names
         api_key = EMBEDDING_API_KEY or MODELSCOPE_API_KEY
         if not api_key:
-            print("[EmbeddingService] No EMBEDDING_API_KEY, falling back to stub")
-            return True
+            if EMBEDDING_ALLOW_STUB:
+                print("[EmbeddingService] No EMBEDDING_API_KEY, falling back to stub")
+                return True
+            raise RuntimeError("Missing EMBEDDING_API_KEY (and MODELSCOPE_API_KEY). Stub fallback is disabled.")
         return False
 
     def _init_client(self):
@@ -124,6 +128,7 @@ class EmbeddingService:
 
     def _set_to_cache(self, cache_key: str, vector: List[float]):
         """Set vector to Redis or memory cache"""
+        self._assert_vector_dims(vector)
         # Try Redis first
         if self._redis_client:
             try:
@@ -139,6 +144,16 @@ class EmbeddingService:
             with self._cache_lock:
                 self._cache[cache_key] = vector
 
+    def _assert_vector_dims(self, vector: List[float]):
+        """Fail fast if embedding vector dims mismatch expected dimension."""
+        expected = int(self.dimension or 0)
+        got = len(vector) if vector is not None else 0
+        if expected > 0 and got != expected:
+            raise ValueError(
+                f"Embedding dims mismatch: expected={expected}, got={got}. "
+                f"provider={EMBEDDING_PROVIDER}, model={self.model_name}"
+            )
+
     def embed(self, text: str) -> List[float]:
         """Embed single text"""
         if self._use_stub:
@@ -149,10 +164,12 @@ class EmbeddingService:
         # Check cache (Redis or memory)
         cached = self._get_from_cache(cache_key)
         if cached is not None:
+            self._assert_vector_dims(cached)
             return cached
 
         # Call API with retry
         vector = self._embed_with_retry([text])[0]
+        self._assert_vector_dims(vector)
 
         # Cache the result
         self._set_to_cache(cache_key, vector)
@@ -176,6 +193,7 @@ class EmbeddingService:
             cache_key = self._get_cache_key(text)
             cached = self._get_from_cache(cache_key)
             if cached is not None:
+                self._assert_vector_dims(cached)
                 results[i] = cached
             else:
                 texts_to_embed.append(text)
@@ -185,6 +203,7 @@ class EmbeddingService:
         if texts_to_embed:
             vectors = self._embed_with_retry(texts_to_embed)
             for idx, vector in zip(indices_to_embed, vectors):
+                self._assert_vector_dims(vector)
                 results[idx] = vector
                 cache_key = self._get_cache_key(texts[idx])
                 self._set_to_cache(cache_key, vector)
@@ -208,7 +227,10 @@ class EmbeddingService:
                 # Record success metrics
                 observe_embedding_latency(time.time() - start_time)
                 inc_embedding_request("success")
-                return [item.embedding for item in response.data]
+                vectors = [item.embedding for item in response.data]
+                for v in vectors:
+                    self._assert_vector_dims(v)
+                return vectors
 
             except Exception as e:
                 last_error = e

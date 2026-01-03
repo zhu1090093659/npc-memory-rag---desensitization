@@ -10,10 +10,11 @@ import math
 import hashlib
 
 from .models import Memory, MemoryType
+from src import get_env, get_env_int
 
 
 # Thread pool size for parallel BM25 + Vector search
-SEARCH_THREAD_POOL_SIZE = int(os.getenv("SEARCH_THREAD_POOL_SIZE", "16"))
+SEARCH_THREAD_POOL_SIZE = get_env_int("SEARCH_THREAD_POOL_SIZE")
 
 
 class MemorySearcher:
@@ -22,10 +23,10 @@ class MemorySearcher:
     # Shared thread pool for parallel search execution
     _executor = ThreadPoolExecutor(max_workers=SEARCH_THREAD_POOL_SIZE, thread_name_prefix="search_")
 
-    def __init__(self, es_client, embedding_service, index_alias: str = "npc_memories"):
+    def __init__(self, es_client, embedding_service, index_alias: str = None):
         self.es = es_client
         self.embedder = embedding_service
-        self.index_alias = index_alias
+        self.index_alias = index_alias or get_env("INDEX_ALIAS")
 
     def search_memories(
         self,

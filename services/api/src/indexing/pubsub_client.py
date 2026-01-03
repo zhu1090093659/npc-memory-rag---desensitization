@@ -7,6 +7,7 @@ import os
 from google.cloud import pubsub_v1
 
 from .tasks import IndexTask
+from src import get_env
 
 
 class PubSubPublisher:
@@ -14,10 +15,12 @@ class PubSubPublisher:
 
     def __init__(self, project_id: str = None, topic_name: str = None):
         self.project_id = project_id or os.getenv("PUBSUB_PROJECT_ID")
-        self.topic_name = topic_name or os.getenv("PUBSUB_TOPIC", "index-tasks")
+        self.topic_name = topic_name or os.getenv("PUBSUB_TOPIC")
 
         if not self.project_id:
             raise ValueError("PUBSUB_PROJECT_ID not set")
+        if not self.topic_name:
+            raise ValueError("PUBSUB_TOPIC not set")
 
         self.publisher = pubsub_v1.PublisherClient()
         self.topic_path = self.publisher.topic_path(self.project_id, self.topic_name)
@@ -30,7 +33,7 @@ class PubSubPublisher:
         data = task.to_json().encode("utf-8")
         # Add attributes to help trace producers and message schema.
         attrs = {
-            "producer": os.getenv("PUBSUB_PRODUCER", "npc-memory-api"),
+            "producer": get_env("PUBSUB_PRODUCER"),
             "schema": "IndexTask.v1",
             "op": str(getattr(task, "op", "") or ""),
         }
@@ -47,7 +50,7 @@ class PubSubPublisher:
         for task in tasks:
             data = task.to_json().encode("utf-8")
             attrs = {
-                "producer": os.getenv("PUBSUB_PRODUCER", "npc-memory-api"),
+                "producer": get_env("PUBSUB_PRODUCER"),
                 "schema": "IndexTask.v1",
                 "op": str(getattr(task, "op", "") or ""),
             }

@@ -6,27 +6,17 @@
 
 ```
 npc-memory-rag/
-├── src/
-│   ├── api/                 # REST API 服务层
-│   │   ├── app.py           # FastAPI 主应用（API 入口）
-│   │   ├── schemas.py       # Pydantic 数据模型
-│   │   └── dependencies.py  # 依赖注入
-│   ├── memory/              # 核心记忆模块
-│   │   ├── models.py        # 数据模型（Memory、MemoryContext）
-│   │   ├── embedding.py     # Embedding 服务（Qwen3）
-│   │   ├── es_schema.py     # ES 索引配置
-│   │   ├── search.py        # 混合检索（BM25+Vector+RRF）
-│   │   └── write.py         # 写入操作
-│   ├── indexing/            # 异步索引模块
-│   │   ├── tasks.py         # 索引任务定义
-│   │   ├── pubsub_client.py # Pub/Sub 封装
-│   │   └── push_app.py      # Push Worker（Worker 入口）
-│   ├── memory_service.py    # Facade 兼容层
-│   ├── es_client.py         # ES 客户端工具
-│   └── metrics.py           # Prometheus 指标
+├── services/                # Cloud Run 多服务部署目录（各自独立构建）
+│   ├── api/
+│   │   ├── Dockerfile       # API Service 镜像构建入口
+│   │   ├── requirements.txt
+│   │   └── src/             # 为保证 import 路径不变，内置一份 src 副本
+│   └── worker/
+│       ├── Dockerfile       # Worker Service 镜像构建入口
+│       ├── requirements.txt
+│       └── src/             # 为保证 import 路径不变，内置一份 src 副本
 ├── examples/                # 示例脚本
 │   └── benchmark.py         # 性能基准测试
-├── Dockerfile               # 容器化部署
 └── docker-compose.yml       # ES + Redis + Prometheus
 ```
 
@@ -39,7 +29,7 @@ flowchart TB
     end
 
     subgraph API["API Service (FastAPI)"]
-        APIApp["src/api/app.py"]
+        APIApp["services/api/src/api/app.py"]
         Schemas["schemas.py"]
         Deps["dependencies.py"]
     end
@@ -53,7 +43,7 @@ flowchart TB
     end
 
     subgraph Worker["Worker Service (FastAPI)"]
-        PushApp["src/indexing/push_app.py"]
+        PushApp["services/worker/src/indexing/push_app.py"]
         Tasks["tasks.py"]
     end
 
@@ -131,12 +121,27 @@ docker-compose up -d es-coordinator kibana redis
 ### 2. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip install -r services/api/requirements.txt
+```
+
+### 2.1 配置环境变量（推荐用 .env）
+
+把示例文件复制成 `.env`，然后按你的环境改里面的值：
+
+```bash
+cp env.example .env
+```
+
+Windows PowerShell：
+
+```bash
+Copy-Item env.example .env
 ```
 
 ### 3. 初始化索引
 
 ```bash
+cd services/api
 python -c "from src.es_client import create_es_client, initialize_index; initialize_index(create_es_client())"
 ```
 
@@ -144,9 +149,11 @@ python -c "from src.es_client import create_es_client, initialize_index; initial
 
 ```bash
 # 启动 API 服务
+cd services/api
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 
 # 启动 Worker 服务（异步模式需要，另开终端）
+cd services/worker
 uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 ```
 
@@ -191,17 +198,14 @@ results = service.search_memories(
 异步模式需要配置 Pub/Sub 和 Redis：
 
 ```bash
-# 设置环境变量
-export INDEX_ASYNC_ENABLED=true
-export REDIS_URL=redis://localhost:6379
-export PUBSUB_PROJECT_ID=your-project-id
-export PUBSUB_TOPIC=npc-memory-tasks
+# 建议用 .env 统一管理（见上面的 env.example -> .env）
 
 # 启动 Worker
+cd services/worker
 uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 ```
 
-详见 [ASYNC_INDEXING.md](ASYNC_INDEXING.md)
+详见 [CLAUDE.md](CLAUDE.md)
 
 ## 环境变量
 
@@ -268,7 +272,7 @@ curl "https://npc-memory-api-xxxxxxxxxxxx.asia-southeast1.run.app/search?player_
 open https://npc-memory-api-xxxxxxxxxxxx.asia-southeast1.run.app/docs
 ```
 
-详见 [CLAUDE.md](CLAUDE.md) 和 [ASYNC_INDEXING.md](ASYNC_INDEXING.md) 中的部署章节。
+详见 [CLAUDE.md](CLAUDE.md) 中的部署章节。
 
 ## 技术栈
 

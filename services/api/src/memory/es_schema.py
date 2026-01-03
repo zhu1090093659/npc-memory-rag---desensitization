@@ -5,13 +5,14 @@ Elasticsearch index schema and settings
 import os
 from datetime import datetime
 
+from src import get_env_int
 
 # Index alias for memories
 INDEX_ALIAS = "npc_memories"
 
 # Vector dimension (from env, must match embedding model output)
-# qwen3-embedding-8b outputs 1024 dimensions
-INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "1024"))
+# Vector dimension (from env, must match embedding model output)
+INDEX_VECTOR_DIMS = get_env_int("INDEX_VECTOR_DIMS")
 
 
 def get_index_settings(vector_dims: int = None) -> dict:

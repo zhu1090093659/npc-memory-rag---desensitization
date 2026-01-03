@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from elasticsearch import Elasticsearch
 from src.memory import INDEX_ALIAS, create_index_if_not_exists, get_index_settings
+from src import get_env
 
 
 def create_es_client(
@@ -28,7 +29,7 @@ def create_es_client(
     """
     # Priority: explicit params > env vars > defaults
     if hosts is None and es_url is None:
-        es_url = os.getenv("ES_URL", "http://localhost:9200")
+        es_url = get_env("ES_URL")
 
     if api_key is None:
         api_key = os.getenv("ES_API_KEY")

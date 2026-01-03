@@ -13,6 +13,7 @@ from src.es_client import create_es_client
 from src.memory import EmbeddingService
 from src.memory_service import NPCMemoryService, create_redis_cache
 from src.indexing import PubSubPublisher
+from src import get_env_bool, get_env_int
 
 
 # Lazy-initialized singletons
@@ -92,7 +93,7 @@ def get_publisher() -> Optional[PubSubPublisher]:
     global _publisher
     if _publisher is None:
         # Only create publisher if async indexing is enabled
-        if os.getenv("INDEX_ASYNC_ENABLED", "false").lower() == "true":
+        if get_env_bool("INDEX_ASYNC_ENABLED"):
             try:
                 _publisher = PubSubPublisher()
             except Exception as e:
@@ -108,7 +109,7 @@ def get_reply_store() -> Optional[RedisReplyStore]:
         return _reply_store
 
     redis_url = os.getenv("REDIS_URL")
-    ttl_seconds = int(os.getenv("REPLY_TTL_SECONDS", "60"))
+    ttl_seconds = get_env_int("REPLY_TTL_SECONDS")
     if not redis_url:
         print("[Dependencies] REDIS_URL not set, reply-store disabled")
         _reply_store = None
