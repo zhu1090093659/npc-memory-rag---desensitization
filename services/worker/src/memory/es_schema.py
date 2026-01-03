@@ -10,8 +10,8 @@ from datetime import datetime
 INDEX_ALIAS = "npc_memories"
 
 # Vector dimension (from env, must match embedding model output)
-# qwen3-embedding-8b outputs 1024 dimensions
-INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "1024"))
+# Vector dimension (from env, must match embedding model output)
+INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "4096"))
 
 
 def get_index_settings(vector_dims: int = None) -> dict:
