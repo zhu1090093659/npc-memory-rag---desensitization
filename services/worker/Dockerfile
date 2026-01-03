@@ -12,5 +12,7 @@ COPY . .
 # Default port
 ENV PORT=8080
 
-# Default: API service
-CMD ["python", "-m", "uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Worker service (Pub/Sub push handler)
+CMD ["python", "-m", "uvicorn", "src.indexing.push_app:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
