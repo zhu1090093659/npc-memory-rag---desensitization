@@ -1,0 +1,17 @@
+# Prometheus configuration for NPC Memory RAG
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Worker metrics (pull mode)
+  - job_name: 'npc-memory-worker'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    # For Cloud Run push mode, use service discovery or static config:
+    # - targets: ['your-worker.run.app']
+
+  # Elasticsearch metrics (optional, requires elasticsearch-exporter)
+  # - job_name: 'elasticsearch'
+  #   static_configs:
+  #     - targets: ['elasticsearch-exporter:9114']

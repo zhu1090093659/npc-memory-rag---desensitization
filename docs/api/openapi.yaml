@@ -1,0 +1,305 @@
+openapi: 3.0.3
+info:
+  title: NPC Memory Push Worker API
+  description: |
+    NPC Memory RAG system Push Worker API for processing memory indexing tasks.
+
+    This service receives indexing tasks from Google Cloud Pub/Sub push delivery,
+    generates embeddings using OpenAI-compatible API (default: Qwen3), and indexes memories to Elasticsearch.
+
+    ## Architecture
+
+    ```
+    Pub/Sub Topic -> Push Subscription -> This API -> Elasticsearch
+    ```
+
+    ## Authentication
+
+    This API is designed to receive requests from Google Cloud Pub/Sub push subscriptions.
+    In production, configure push authentication with a service account.
+
+  version: 1.0.0
+  contact:
+    name: NPC Memory RAG Team
+  license:
+    name: MIT
+
+servers:
+  - url: https://npc-memory-worker-{project_number}.asia-southeast1.run.app
+    description: Production (Cloud Run Singapore)
+    variables:
+      project_number:
+        default: "xxxxxxxxxxxx"
+        description: GCP Project Number
+  - url: http://localhost:8080
+    description: Local Development
+
+tags:
+  - name: Pub/Sub
+    description: Pub/Sub push message handling
+  - name: Health
+    description: Health and readiness checks
+  - name: Metrics
+    description: Prometheus metrics
+
+paths:
+  /pubsub/push:
+    post:
+      tags:
+        - Pub/Sub
+      summary: Handle Pub/Sub push delivery
+      description: |
+        Receives push messages from Google Cloud Pub/Sub subscription.
+
+        - Returns 2xx to acknowledge the message (ack)
+        - Returns non-2xx to trigger Pub/Sub retry (nack)
+
+        The message data should be a base64-encoded JSON IndexTask.
+      operationId: handlePubSubPush
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubSubPushRequest'
+            examples:
+              validMessage:
+                summary: Valid indexing task
+                value:
+                  message:
+                    data: "eyJ0YXNrX2lkIjoidGVzdC0wMDEiLCJwbGF5ZXJfaWQiOiJwbGF5ZXJfMSIsIm5wY19pZCI6Im5wY19ibGFja3NtaXRoIiwibWVtb3J5X3R5cGUiOiJkaWFsb2d1ZSIsImNvbnRlbnQiOiJUaGUgYmxhY2tzbWl0aCBvZmZlcmVkIG1lIGEgc3dvcmQuIiwiaW1wb3J0YW5jZSI6MC44LCJlbW90aW9uX3RhZ3MiOlsiaGFwcHkiXSwidGltZXN0YW1wIjoiMjAyNS0wMS0wMVQwMDowMDowMCIsImdhbWVfY29udGV4dCI6e319"
+                    messageId: "123456789"
+                    publishTime: "2025-01-01T00:00:00.000Z"
+                  subscription: "projects/npc-memory-rag/subscriptions/index-tasks-push"
+      responses:
+        '200':
+          description: Message processed successfully (acknowledged)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushSuccessResponse'
+              example:
+                status: "ok"
+                task_id: "test-001"
+        '400':
+          description: Invalid message format (acknowledged to prevent retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "Invalid task format: Expecting property name"
+        '500':
+          description: Processing failed (will trigger Pub/Sub retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "Processing failed"
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: |
+        Basic health check endpoint. Always returns healthy if the service is running.
+        Used by Cloud Run and load balancers.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "healthy"
+
+  /ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness check
+      description: |
+        Readiness check that verifies Elasticsearch connection.
+        Returns 503 if ES is not reachable.
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: Service is ready (ES connected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                status: "ready"
+        '503':
+          description: Service not ready (ES connection failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "ES not reachable"
+
+  /metrics:
+    get:
+      tags:
+        - Metrics
+      summary: Prometheus metrics
+      description: |
+        Exposes Prometheus metrics for monitoring.
+
+        Available metrics:
+        - `npc_memory_worker_messages_pulled_total`: Total messages pulled
+        - `npc_memory_worker_messages_processed_total`: Total messages processed (by status)
+        - `npc_memory_worker_bulk_latency_seconds`: ES write latency histogram
+        - `npc_memory_embedding_latency_seconds`: Embedding generation latency
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics in text format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP npc_memory_worker_messages_pulled_total Total messages pulled
+                # TYPE npc_memory_worker_messages_pulled_total counter
+                npc_memory_worker_messages_pulled_total 100.0
+                # HELP npc_memory_worker_messages_processed_total Total messages processed
+                # TYPE npc_memory_worker_messages_processed_total counter
+                npc_memory_worker_messages_processed_total{status="success"} 95.0
+                npc_memory_worker_messages_processed_total{status="error"} 5.0
+
+components:
+  schemas:
+    PubSubPushRequest:
+      type: object
+      description: Google Cloud Pub/Sub push message envelope
+      required:
+        - message
+      properties:
+        message:
+          type: object
+          description: The Pub/Sub message
+          required:
+            - data
+          properties:
+            data:
+              type: string
+              format: byte
+              description: Base64-encoded IndexTask JSON
+            messageId:
+              type: string
+              description: Pub/Sub message ID
+            publishTime:
+              type: string
+              format: date-time
+              description: Message publish timestamp
+            attributes:
+              type: object
+              additionalProperties:
+                type: string
+              description: Message attributes
+        subscription:
+          type: string
+          description: Full subscription name
+          example: "projects/npc-memory-rag/subscriptions/index-tasks-push"
+
+    IndexTask:
+      type: object
+      description: Memory indexing task
+      required:
+        - task_id
+        - player_id
+        - npc_id
+        - content
+        - memory_type
+        - timestamp
+      properties:
+        task_id:
+          type: string
+          description: Unique task identifier (used as ES document ID for idempotency)
+          example: "test-001"
+        player_id:
+          type: string
+          description: Player identifier
+          example: "player_123"
+        npc_id:
+          type: string
+          description: NPC identifier
+          example: "npc_blacksmith"
+        content:
+          type: string
+          description: Memory content text
+          example: "The blacksmith offered me a legendary sword for 1000 gold."
+        memory_type:
+          type: string
+          enum: [dialogue, quest, trade, gift, combat, emotion]
+          description: Type of memory
+          example: "dialogue"
+        timestamp:
+          type: string
+          format: date-time
+          description: When the memory was created
+          example: "2025-01-01T00:00:00"
+        importance:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: Memory importance score (0-1)
+          example: 0.8
+        emotion_tags:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Emotion tags associated with the memory
+          example: ["happy", "excited"]
+        game_context:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: Additional game context data
+          example:
+            location: "village_smithy"
+            quest: "find_sword"
+
+    PushSuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ok"]
+          description: Processing status
+        task_id:
+          type: string
+          description: Processed task ID
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["healthy"]
+          description: Health status
+
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ready"]
+          description: Readiness status
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Error message

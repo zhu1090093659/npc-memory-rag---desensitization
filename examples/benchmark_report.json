@@ -1,0 +1,134 @@
+{
+  "timestamp": "2026-01-02T20:03:03.001174",
+  "environment": {
+    "BENCH_API_BASE_URL": "https://npc-memory-api-xxxxxxxxxxxx.asia-southeast1.run.app",
+    "BENCH_TIMEOUT_SECONDS": "80",
+    "BENCH_PLAYER_ID": "player_1",
+    "BENCH_NPC_ID": "npc_blacksmith",
+    "BENCH_SEED_ENABLED": "True",
+    "BENCH_SEED_COUNT": "50",
+    "BENCH_SEARCH_ITERATIONS": "30",
+    "BENCH_WRITE_ITERATIONS": "20",
+    "BENCH_WARMUP": "2",
+    "BENCH_CONCURRENCY_LIST": "2,4,8,16",
+    "BENCH_TOTAL_REQUESTS": "60"
+  },
+  "results": [
+    {
+      "name": "api_health",
+      "samples": 3,
+      "min_ms": 276.61824226379395,
+      "max_ms": 611.1512184143066,
+      "avg_ms": 412.11509704589844,
+      "p50_ms": 348.5758304595947,
+      "p95_ms": 611.1512184143066,
+      "p99_ms": 611.1512184143066,
+      "throughput": 2.42595315677844,
+      "errors": 0
+    },
+    {
+      "name": "api_ready",
+      "samples": 3,
+      "min_ms": 272.9010581970215,
+      "max_ms": 337.62645721435547,
+      "avg_ms": 311.1519018809001,
+      "p50_ms": 322.92819023132324,
+      "p95_ms": 337.62645721435547,
+      "p99_ms": 337.62645721435547,
+      "throughput": 3.2132020294157004,
+      "errors": 0
+    },
+    {
+      "name": "write_memories",
+      "samples": 20,
+      "min_ms": 614.966630935669,
+      "max_ms": 729.985237121582,
+      "avg_ms": 658.7875127792358,
+      "p50_ms": 643.7952518463135,
+      "p95_ms": 729.985237121582,
+      "p99_ms": 729.985237121582,
+      "throughput": 1.5177609488437647,
+      "errors": 0
+    },
+    {
+      "name": "search_cold_unique_query",
+      "samples": 5,
+      "min_ms": 326.95698738098145,
+      "max_ms": 431.2608242034912,
+      "avg_ms": 376.3374328613281,
+      "p50_ms": 374.1495609283447,
+      "p95_ms": 431.2608242034912,
+      "p99_ms": 431.2608242034912,
+      "throughput": 2.6563558047870726,
+      "errors": 0
+    },
+    {
+      "name": "search_cached_same_query",
+      "samples": 30,
+      "min_ms": 334.64527130126953,
+      "max_ms": 821.9788074493408,
+      "avg_ms": 385.1434310277303,
+      "p50_ms": 360.55684089660645,
+      "p95_ms": 506.91843032836914,
+      "p99_ms": 821.9788074493408,
+      "throughput": 2.595875386547384,
+      "errors": 0
+    },
+    {
+      "name": "search_concurrent_2",
+      "samples": 60,
+      "min_ms": 320.0700283050537,
+      "max_ms": 1296.2594032287598,
+      "avg_ms": 395.6592361132304,
+      "p50_ms": 353.9714813232422,
+      "p95_ms": 839.1997814178467,
+      "p99_ms": 1296.2594032287598,
+      "throughput": 4.9869290854160555,
+      "errors": 0
+    },
+    {
+      "name": "search_concurrent_4",
+      "samples": 60,
+      "min_ms": 324.23949241638184,
+      "max_ms": 617.5496578216553,
+      "avg_ms": 366.18873675664264,
+      "p50_ms": 350.6162166595459,
+      "p95_ms": 439.08071517944336,
+      "p99_ms": 617.5496578216553,
+      "throughput": 10.565264052212232,
+      "errors": 0
+    },
+    {
+      "name": "search_concurrent_8",
+      "samples": 60,
+      "min_ms": 325.5467414855957,
+      "max_ms": 1024.113655090332,
+      "avg_ms": 414.96920982996625,
+      "p50_ms": 393.33200454711914,
+      "p95_ms": 510.86926460266113,
+      "p99_ms": 1024.113655090332,
+      "throughput": 18.264308145404243,
+      "errors": 0
+    },
+    {
+      "name": "search_concurrent_16",
+      "samples": 60,
+      "min_ms": 331.47597312927246,
+      "max_ms": 716.1698341369629,
+      "avg_ms": 506.45787715911865,
+      "p50_ms": 509.63473320007324,
+      "p95_ms": 676.0463714599609,
+      "p99_ms": 716.1698341369629,
+      "throughput": 28.46366395495005,
+      "errors": 0
+    }
+  ],
+  "bottlenecks": [
+    "Cache benefit is minimal - check cache configuration",
+    "Cached search latency is high (385ms) - network/ES latency"
+  ],
+  "recommendations": [
+    "Deploy to same region as Elasticsearch",
+    "Good concurrency scaling (71%)"
+  ]
+}
