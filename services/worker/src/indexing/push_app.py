@@ -25,9 +25,10 @@ from src.memory import Memory, MemoryType, EmbeddingService
 from src.memory.search import MemorySearcher
 from src.es_client import create_es_client
 from src.metrics import inc_worker_pulled, inc_worker_processed, observe_bulk_latency
+from src import get_env, get_env_int
 
 # Concurrency control: limit in-flight tasks to apply backpressure
-MAX_INFLIGHT_TASKS = int(os.getenv("MAX_INFLIGHT_TASKS", "4"))
+MAX_INFLIGHT_TASKS = get_env_int("MAX_INFLIGHT_TASKS")
 _inflight_semaphore = asyncio.Semaphore(MAX_INFLIGHT_TASKS)
 
 # Thread pool for blocking I/O operations (embedding, ES indexing)
@@ -61,7 +62,7 @@ _embedder = None
 _redis_client = None
 
 # Reply channel configuration (request-reply via Redis)
-REPLY_TTL_SECONDS = int(os.getenv("REPLY_TTL_SECONDS", "60"))
+REPLY_TTL_SECONDS = get_env_int("REPLY_TTL_SECONDS")
 
 
 def get_es_client():
@@ -233,7 +234,7 @@ def _sync_process_task(task: IndexTask) -> bool:
         if op == "search":
             es = get_es_client()
             embedder = get_embedder()
-            index_alias = os.getenv("INDEX_ALIAS", "npc_memories")
+            index_alias = get_env("INDEX_ALIAS")
             searcher = MemorySearcher(es, embedder, index_alias=index_alias)
 
             types = None
@@ -299,7 +300,7 @@ def _sync_process_task(task: IndexTask) -> bool:
         start_time = time.time()
         # Note: routing parameter not supported in Elastic Cloud Serverless mode
         es.index(
-            index=os.getenv("INDEX_ALIAS", "npc_memories"),
+            index=get_env("INDEX_ALIAS"),
             id=doc["_id"],
             body={k: v for k, v in doc.items() if not k.startswith("_")}
         )

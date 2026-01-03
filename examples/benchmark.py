@@ -73,29 +73,37 @@ def calculate_percentile(data: List[float], percentile: float) -> float:
     return sorted_data[min(index, len(sorted_data) - 1)]
 
 
-def _get_env_int(name: str, default: int) -> int:
-    """Parse int env var with fallback"""
+def _get_env_required(name: str) -> str:
+    """Get required env var, raise if missing/empty."""
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
-        return default
+        raise RuntimeError(f"{name} is required")
+    return raw
+
+
+def _get_env_int(name: str) -> int:
+    """Parse required int env var."""
+    raw = _get_env_required(name)
     try:
         return int(raw)
-    except Exception:
-        return default
+    except Exception as e:
+        raise RuntimeError(f"{name} must be int, got {raw!r}") from e
 
 
-def _get_env_bool(name: str, default: bool) -> bool:
-    """Parse bool env var with fallback"""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+def _get_env_bool(name: str) -> bool:
+    """Parse required bool env var."""
+    raw = _get_env_required(name).strip().lower()
+    if raw in ("1", "true", "yes", "y", "on"):
+        return True
+    if raw in ("0", "false", "no", "n", "off"):
+        return False
+    raise RuntimeError(f"{name} must be bool, got {raw!r}")
 
 
-def _parse_int_list(raw: str, default: List[int]) -> List[int]:
-    """Parse comma-separated int list"""
+def _parse_int_list(raw: str) -> List[int]:
+    """Parse comma-separated int list (required)"""
     if not raw:
-        return default
+        raise RuntimeError(f"{ENV_CONCURRENCY_LIST} is required")
     items: List[int] = []
     for part in raw.split(","):
         part = part.strip()
@@ -105,7 +113,9 @@ def _parse_int_list(raw: str, default: List[int]) -> List[int]:
             items.append(int(part))
         except Exception:
             continue
-    return items or default
+    if not items:
+        raise RuntimeError(f"{ENV_CONCURRENCY_LIST} is invalid: {raw!r}")
+    return items
 
 
 def _http_json(
@@ -126,7 +136,7 @@ def _http_json(
 
     req = urllib_request.Request(url=url, data=data, method=method, headers=headers)
     start = time.time()
-    max_retries = _get_env_int(ENV_HTTP_MAX_RETRIES, 2)
+    max_retries = _get_env_int(ENV_HTTP_MAX_RETRIES)
 
     for attempt in range(max_retries + 1):
         try:
@@ -262,24 +272,20 @@ def run_benchmarks():
     print(f"Start time: {datetime.now().isoformat()}")
     print()
 
-    api_base = os.getenv(ENV_BENCH_API_BASE_URL, "").strip().rstrip("/")
-    if not api_base:
-        raise RuntimeError(
-            f"{ENV_BENCH_API_BASE_URL} is required, e.g. https://npc-memory-api-xxxx.asia-southeast1.run.app"
-        )
+    api_base = _get_env_required(ENV_BENCH_API_BASE_URL).strip().rstrip("/")
 
     # Cloud Run request-reply may block up to REQUEST_TIMEOUT_SECONDS (default 25s),
     # so the client timeout should be safely higher to avoid false timeouts.
-    timeout_seconds = _get_env_int(ENV_TIMEOUT_SECONDS, 60)
-    player_id = os.getenv(ENV_PLAYER_ID, "player_1")
-    npc_id = os.getenv(ENV_NPC_ID, "npc_blacksmith")
-    seed_count = _get_env_int(ENV_SEED_COUNT, 30)
-    seed_enabled = _get_env_bool(ENV_SEED_ENABLED, True)
-    search_iterations = _get_env_int(ENV_SEARCH_ITERATIONS, 20)
-    write_iterations = _get_env_int(ENV_WRITE_ITERATIONS, 10)
-    warmup = _get_env_int(ENV_WARMUP, 2)
-    concurrency_list = _parse_int_list(os.getenv(ENV_CONCURRENCY_LIST, "2,4,8"), [2, 4, 8])
-    total_requests = _get_env_int(ENV_TOTAL_REQUESTS, 30)
+    timeout_seconds = _get_env_int(ENV_TIMEOUT_SECONDS)
+    player_id = _get_env_required(ENV_PLAYER_ID)
+    npc_id = _get_env_required(ENV_NPC_ID)
+    seed_count = _get_env_int(ENV_SEED_COUNT)
+    seed_enabled = _get_env_bool(ENV_SEED_ENABLED)
+    search_iterations = _get_env_int(ENV_SEARCH_ITERATIONS)
+    write_iterations = _get_env_int(ENV_WRITE_ITERATIONS)
+    warmup = _get_env_int(ENV_WARMUP)
+    concurrency_list = _parse_int_list(_get_env_required(ENV_CONCURRENCY_LIST))
+    total_requests = _get_env_int(ENV_TOTAL_REQUESTS)
 
     report = BenchmarkReport(
         timestamp=datetime.now().isoformat(),

@@ -18,10 +18,11 @@ from src.memory import (
     MemoryWriter,
     create_index_if_not_exists
 )
+from src import get_env_int
 
 # Redis cache settings
-REDIS_URL = os.getenv("REDIS_URL", "")
-CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
+REDIS_URL = os.getenv("REDIS_URL")
+CACHE_TTL_SECONDS = get_env_int("CACHE_TTL_SECONDS")
 CACHE_KEY_VERSION = "v1"  # Bump this to invalidate all cache
 
 

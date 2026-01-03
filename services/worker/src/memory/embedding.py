@@ -10,32 +10,30 @@ import hashlib
 import threading
 from typing import List, Optional
 
+from src import get_env, get_env_bool, get_env_int
+
 
 # Environment variable configs
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai_compatible")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://api.bltcy.ai/v1")
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-8b")
-# Embedding vector dimension (must match the embedding model output and ES mapping)
-INDEX_VECTOR_DIMS = int(os.getenv("INDEX_VECTOR_DIMS", "4096"))
-
-# Whether to allow silent fallback to stub when API key is missing.
-# For production, set EMBEDDING_ALLOW_STUB=false to fail fast.
-EMBEDDING_ALLOW_STUB = os.getenv("EMBEDDING_ALLOW_STUB", "true").lower() == "true"
+EMBEDDING_PROVIDER = get_env("EMBEDDING_PROVIDER")
+EMBEDDING_BASE_URL = get_env("EMBEDDING_BASE_URL")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
+EMBEDDING_MODEL = get_env("EMBEDDING_MODEL")
+INDEX_VECTOR_DIMS = get_env_int("INDEX_VECTOR_DIMS")
+EMBEDDING_ALLOW_STUB = get_env_bool("EMBEDDING_ALLOW_STUB")
 
 # Backward compatibility aliases
-MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL", EMBEDDING_BASE_URL)
-MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY", EMBEDDING_API_KEY)
+MODELSCOPE_BASE_URL = os.getenv("MODELSCOPE_BASE_URL") or EMBEDDING_BASE_URL
+MODELSCOPE_API_KEY = os.getenv("MODELSCOPE_API_KEY") or (EMBEDDING_API_KEY or "")
 
 # Embedding cache settings
-EMBEDDING_CACHE_ENABLED = os.getenv("EMBEDDING_CACHE_ENABLED", "false").lower() == "true"
-REDIS_URL = os.getenv("REDIS_URL", "")
+EMBEDDING_CACHE_ENABLED = get_env_bool("EMBEDDING_CACHE_ENABLED")
+REDIS_URL = os.getenv("REDIS_URL")
 EMBEDDING_CACHE_PREFIX = "emb:v1:"
 EMBEDDING_CACHE_TTL = 86400 * 7  # 7 days TTL for embedding vectors
 
 # Retry settings
-EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "30"))
-EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+EMBEDDING_TIMEOUT = get_env_int("EMBEDDING_TIMEOUT")
+EMBEDDING_MAX_RETRIES = get_env_int("EMBEDDING_MAX_RETRIES")
 
 
 class EmbeddingService:

@@ -9,6 +9,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   conda activate py312
   pip install -r services/api/requirements.txt
   ```
+- **Environment Variables**: Use `.env` for local development (recommended)
+  ```bash
+  cp env.example .env
+  ```
+  PowerShell:
+  ```bash
+  Copy-Item env.example .env
+  ```
 - **Local Infrastructure**: Docker Compose for ES + Redis
   ```bash
   docker-compose up -d es-coordinator kibana redis  # Lightweight dev setup

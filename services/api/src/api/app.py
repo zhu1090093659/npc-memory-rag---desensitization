@@ -31,8 +31,9 @@ from .dependencies import get_memory_service, get_publisher, get_es_client, get_
 from src.memory import MemoryType
 from src.indexing import IndexTask
 from src.metrics import inc_cache_hit, inc_cache_miss
+from src import get_env_int
 
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25"))
+REQUEST_TIMEOUT_SECONDS = get_env_int("REQUEST_TIMEOUT_SECONDS")
 
 
 app = FastAPI(

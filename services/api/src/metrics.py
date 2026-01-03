@@ -7,8 +7,10 @@ import time
 from contextlib import contextmanager
 from typing import Callable
 
+from src import get_env_int
+
 # Metrics port for pull mode
-METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+METRICS_PORT = get_env_int("METRICS_PORT")
 
 # Lazy initialization flag
 _initialized = False

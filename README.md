@@ -124,6 +124,20 @@ docker-compose up -d es-coordinator kibana redis
 pip install -r services/api/requirements.txt
 ```
 
+### 2.1 配置环境变量（推荐用 .env）
+
+把示例文件复制成 `.env`，然后按你的环境改里面的值：
+
+```bash
+cp env.example .env
+```
+
+Windows PowerShell：
+
+```bash
+Copy-Item env.example .env
+```
+
 ### 3. 初始化索引
 
 ```bash
@@ -184,11 +198,7 @@ results = service.search_memories(
 异步模式需要配置 Pub/Sub 和 Redis：
 
 ```bash
-# 设置环境变量
-export INDEX_ASYNC_ENABLED=true
-export REDIS_URL=redis://localhost:6379
-export PUBSUB_PROJECT_ID=your-project-id
-export PUBSUB_TOPIC=npc-memory-tasks
+# 建议用 .env 统一管理（见上面的 env.example -> .env）
 
 # 启动 Worker
 cd services/worker

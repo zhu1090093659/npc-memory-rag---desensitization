@@ -15,6 +15,9 @@ uvicorn>=0.20.0
 # Monitoring
 prometheus_client>=0.15.0
 
+# Env loading
+python-dotenv>=1.0.0
+
 # Optional: for local embedding (if not using API)
 # transformers>=4.30.0
 # torch>=2.0.0

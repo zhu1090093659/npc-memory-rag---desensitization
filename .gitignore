@@ -3,3 +3,4 @@ docs
 .cursor/
 .claude/
 *.pyc
+.env
