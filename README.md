@@ -8,26 +8,76 @@
 npc-memory-rag/
 ├── src/
 │   ├── api/                 # REST API 服务层
-│   │   ├── app.py           # FastAPI 主应用
+│   │   ├── app.py           # FastAPI 主应用（API 入口）
 │   │   ├── schemas.py       # Pydantic 数据模型
 │   │   └── dependencies.py  # 依赖注入
 │   ├── memory/              # 核心记忆模块
-│   │   ├── models.py        # 数据模型
-│   │   ├── embedding.py     # Embedding 服务（Qwen3/stub）
+│   │   ├── models.py        # 数据模型（Memory、MemoryContext）
+│   │   ├── embedding.py     # Embedding 服务（Qwen3）
 │   │   ├── es_schema.py     # ES 索引配置
-│   │   ├── search.py        # 混合检索
+│   │   ├── search.py        # 混合检索（BM25+Vector+RRF）
 │   │   └── write.py         # 写入操作
 │   ├── indexing/            # 异步索引模块
 │   │   ├── tasks.py         # 索引任务定义
 │   │   ├── pubsub_client.py # Pub/Sub 封装
-│   │   └── push_app.py      # Push Worker（Pub/Sub HTTP 推送入口）
+│   │   └── push_app.py      # Push Worker（Worker 入口）
 │   ├── memory_service.py    # Facade 兼容层
 │   ├── es_client.py         # ES 客户端工具
 │   └── metrics.py           # Prometheus 指标
 ├── examples/                # 示例脚本
-├── demo.py                  # 算法演示（无依赖）
+│   └── benchmark.py         # 性能基准测试
 ├── Dockerfile               # 容器化部署
 └── docker-compose.yml       # ES + Redis + Prometheus
+```
+
+## 系统架构
+
+```mermaid
+flowchart TB
+    subgraph Client["客户端"]
+        GameClient["游戏客户端"]
+    end
+
+    subgraph API["API Service (FastAPI)"]
+        APIApp["src/api/app.py"]
+        Schemas["schemas.py"]
+        Deps["dependencies.py"]
+    end
+
+    subgraph Core["Memory Core"]
+        Service["memory_service.py<br/>Facade"]
+        Search["search.py<br/>BM25+Vector+RRF"]
+        Write["write.py"]
+        Embed["embedding.py<br/>Qwen3"]
+        Models["models.py"]
+    end
+
+    subgraph Worker["Worker Service (FastAPI)"]
+        PushApp["src/indexing/push_app.py"]
+        Tasks["tasks.py"]
+    end
+
+    subgraph Infra["Infrastructure"]
+        ES["Elasticsearch<br/>混合检索"]
+        Redis["Redis<br/>缓存 + Reply"]
+        PubSub["Pub/Sub<br/>任务队列"]
+    end
+
+    GameClient -->|REST| APIApp
+    APIApp --> Service
+    Service --> Search
+    Service --> Write
+    Search --> Embed
+    Write --> Embed
+    Search --> ES
+    Write -->|同步| ES
+    Write -->|异步| PubSub
+    PubSub --> PushApp
+    PushApp --> Embed
+    PushApp --> ES
+    PushApp -->|Reply| Redis
+    APIApp -->|Wait| Redis
+    Service --> Redis
 ```
 
 ## 核心特性
@@ -71,8 +121,8 @@ npc-memory-rag/
 # 完整环境（ES + Redis + Prometheus）
 docker-compose up -d
 
-# 仅 ES（轻量开发）
-docker-compose up -d es-coordinator kibana
+# 轻量开发（推荐）
+docker-compose up -d es-coordinator kibana redis
 ```
 
 ### 2. 安装依赖
@@ -84,15 +134,20 @@ pip install -r requirements.txt
 ### 3. 初始化索引
 
 ```bash
-python examples/init_es.py
+python -c "from src.es_client import create_es_client, initialize_index; initialize_index(create_es_client())"
 ```
 
-### 4. 运行演示
+### 4. 启动服务
 
 ```bash
-# 无依赖演示（自动使用 stub embedding）
-python demo.py
+# 启动 API 服务
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+
+# 启动 Worker 服务（异步模式需要，另开终端）
+uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 ```
+
+启动后访问 http://localhost:8000/docs 查看 OpenAPI 文档。
 
 ### 5. 同步模式使用
 
@@ -130,9 +185,17 @@ results = service.search_memories(
 
 ### 6. 异步模式（Worker）
 
+异步模式需要配置 Pub/Sub 和 Redis：
+
 ```bash
-# Push Worker（Pub/Sub Push → Worker）
-python examples/run_worker.py
+# 设置环境变量
+export INDEX_ASYNC_ENABLED=true
+export REDIS_URL=redis://localhost:6379
+export PUBSUB_PROJECT_ID=your-project-id
+export PUBSUB_TOPIC=npc-memory-tasks
+
+# 启动 Worker
+uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 ```
 
 详见 [ASYNC_INDEXING.md](ASYNC_INDEXING.md)
