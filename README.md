@@ -239,6 +239,16 @@ uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 | `REDIS_URL` | - | Redis 地址（缓存 + request-reply） |
 | `CACHE_TTL_SECONDS` | 300 | 查询缓存过期时间（秒） |
 
+### Rerank 配置（可选，轻量精排）
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `RERANK_ENABLED` | false | 是否开启 LLM 精排（单次 chat 调用，失败自动降级） |
+| `RERANK_MODEL` | - | 用于 rerank 的 chat 模型名（复用 EMBEDDING_BASE_URL / EMBEDDING_API_KEY） |
+| `RERANK_CANDIDATE_LIMIT` | 20 | 参与精排的候选条数上限（实际为 max(top_k, 该值)） |
+| `RERANK_CONTENT_MAX_CHARS` | 240 | 每条记忆 content 截断长度（字符） |
+| `RERANK_TIMEOUT_SECONDS` | 10 | rerank 模型调用超时（秒） |
+
 ### Worker 配置
 
 | 变量 | 默认值 | 说明 |

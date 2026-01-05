@@ -131,7 +131,7 @@ async def search_memories(
     top_k: int = Query(5, ge=1, le=50, description="Maximum number of results"),
     memory_types: Optional[str] = Query(
         None,
-        description="Comma-separated memory types filter (e.g., 'quest,dialogue')",
+        description="Comma-separated preferred memory types (soft preference, e.g., 'quest,dialogue')",
     ),
     time_range_days: Optional[int] = Query(
         None, ge=1, description="Filter memories within N days"
