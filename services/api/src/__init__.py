@@ -9,15 +9,19 @@ from dotenv import load_dotenv
 
 
 def _load_dotenv():
-    """Load .env from repo root (preferred) or service directory (fallback)."""
+    """Load .env from nearest parents (preferred) with safe fallback."""
     here = Path(__file__).resolve()
-    repo_root_env = here.parents[3] / ".env"
-    service_env = here.parents[1] / ".env"
 
+    # Search upward for repo-root .env (works for local dev and containers)
     # Note: override=False to keep real env (Cloud Run, CI) as source of truth.
-    if repo_root_env.exists():
-        load_dotenv(repo_root_env, override=False)
-        return
+    for p in here.parents:
+        env_path = p / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+            return
+
+    # Fallback: service-level .env next to src/ (local dev convenience)
+    service_env = here.parent.parent / ".env"
     if service_env.exists():
         load_dotenv(service_env, override=False)
 

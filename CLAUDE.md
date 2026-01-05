@@ -59,6 +59,47 @@ gcloud run deploy npc-memory-worker \
 gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=npc-memory-api" --limit=50
 ```
 
+### Cloud Run 部署踩坑记录（重要，避免再次翻车）
+
+只记三条：**PowerShell 命令差异**、**Cloud Run 不读本地 `.env`**、**缺 env 会在 import 阶段崩（表象是“没监听 PORT=8080”）**。
+
+```bash
+gcloud auth list
+gcloud config get-value project --quiet
+gcloud config get-value run/region --quiet
+```
+
+#### Cloud Run：启动必需 env（API/Worker 都要有）
+- `ES_URL` / `ES_API_KEY`（推荐 Secret） + `INDEX_ALIAS`
+- `INDEX_VECTOR_DIMS` + `SEARCH_THREAD_POOL_SIZE` + `METRICS_PORT`
+- `ES_ROUTING_ENABLED`
+- `EMBEDDING_PROVIDER` + `EMBEDDING_BASE_URL` + `EMBEDDING_MODEL`
+- `EMBEDDING_ALLOW_STUB` + `EMBEDDING_CACHE_ENABLED` + `EMBEDDING_TIMEOUT` + `EMBEDDING_MAX_RETRIES`
+- `MODELSCOPE_API_KEY` 或 `EMBEDDING_API_KEY`（推荐 Secret）
+
+#### Cloud Run：推荐部署（把 env 显式带上）
+
+```bash
+gcloud run deploy npc-memory-api \
+  --source services/api \
+  --region asia-southeast1 \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
+  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,INDEX_ASYNC_ENABLED=true,REQUEST_TIMEOUT_SECONDS=55,REPLY_TTL_SECONDS=60,CACHE_TTL_SECONDS=300" \
+  --quiet
+```
+
+```bash
+gcloud run deploy npc-memory-worker \
+  --source services/worker \
+  --region asia-southeast1 \
+  --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
+  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,MAX_INFLIGHT_TASKS=4,REPLY_TTL_SECONDS=60" \
+  --quiet
+```
+
+#### 部署后验收
+- `GET /health` / `GET /ready`
+
 ### Benchmark
 
 ```bash
