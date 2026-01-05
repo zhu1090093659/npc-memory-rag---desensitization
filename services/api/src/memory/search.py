@@ -44,11 +44,6 @@ class MemorySearcher:
             {"term": {"npc_id": npc_id}}
         ]
 
-        if memory_types:
-            filters.append({
-                "terms": {"memory_type": [t.value for t in memory_types]}
-            })
-
         if time_range_days:
             filters.append({
                 "range": {
@@ -58,25 +53,31 @@ class MemorySearcher:
                 }
             })
 
+        # Expand candidate pool for post-filter reranking (soft penalties).
+        # Keep a reasonable cap to avoid excessive ES payload.
+        candidate_k = self._candidate_pool_size(top_k)
+
         # Execute both searches in parallel using ThreadPoolExecutor
         future_bm25 = self._executor.submit(
-            self._bm25_search, query, filters, npc_id, top_k * 2
+            self._bm25_search, query, filters, npc_id, candidate_k
         )
         future_vector = self._executor.submit(
-            self._vector_search, query, filters, npc_id, top_k * 2
+            self._vector_search, query, filters, npc_id, candidate_k
         )
 
         # Wait for both results with timeout
         bm25_results = future_bm25.result(timeout=15)
         vector_results = future_vector.result(timeout=15)
 
-        # RRF fusion
-        fused_results = self._rrf_fusion(bm25_results, vector_results, top_k)
+        # RRF fusion (do NOT cut to top_k here; keep candidates for reranking)
+        fused_results = self._rrf_fusion(bm25_results, vector_results, candidate_k)
 
-        # Apply memory decay
-        memories = self._apply_memory_decay(fused_results)
-
-        return memories
+        # Apply memory decay then rerank with multi-level soft penalties
+        return self._rerank_with_soft_penalty(
+            fused_results=fused_results,
+            top_k=top_k,
+            preferred_types=memory_types,
+        )
 
     def _bm25_search(
         self,
@@ -103,7 +104,7 @@ class MemorySearcher:
                 }
             },
             "_source": ["player_id", "npc_id", "content", "memory_type",
-                       "importance", "timestamp", "emotion_tags"]
+                       "importance", "timestamp", "emotion_tags", "game_context"]
         }
 
         # Execute search (routing disabled for Elastic Cloud Serverless compatibility)
@@ -142,7 +143,7 @@ class MemorySearcher:
                 }
             },
             "_source": ["player_id", "npc_id", "content", "memory_type",
-                       "importance", "timestamp", "emotion_tags"]
+                       "importance", "timestamp", "emotion_tags", "game_context"]
         }
 
         # Execute search (routing disabled for Elastic Cloud Serverless compatibility)
@@ -161,7 +162,7 @@ class MemorySearcher:
         self,
         bm25_results: List[dict],
         vector_results: List[dict],
-        top_k: int,
+        limit: int,
         k: int = 60
     ) -> List[dict]:
         """
@@ -197,9 +198,19 @@ class MemorySearcher:
         # Sort by RRF score
         rrf_scores.sort(key=lambda x: x["rrf_score"], reverse=True)
 
-        return rrf_scores[:top_k]
+        return rrf_scores[:limit]
 
-    def _apply_memory_decay(self, results: List[dict]) -> List[Memory]:
+    @staticmethod
+    def _candidate_pool_size(top_k: int) -> int:
+        """
+        Determine ES candidate pool size for reranking.
+        """
+        if top_k <= 0:
+            return 0
+        # 8x is usually enough headroom for reranking while staying lightweight.
+        return min(max(top_k * 8, top_k), 200)
+
+    def _apply_memory_decay(self, results: List[dict]) -> List[dict]:
         """
         Apply memory decay: older memories have lower importance
         Decay formula: decayed_importance = importance * exp(-lambda * days)
@@ -207,7 +218,7 @@ class MemorySearcher:
         decay_lambda = 0.01
         now = datetime.now()
 
-        memories = []
+        items: List[dict] = []
         for r in results:
             doc = r["doc"]
             timestamp = datetime.fromisoformat(doc["timestamp"].replace("Z", "+00:00"))
@@ -228,11 +239,68 @@ class MemorySearcher:
                 timestamp=timestamp,
                 game_context=doc.get("game_context", {})
             )
-            memories.append(memory)
+            items.append(
+                {
+                    "memory": memory,
+                    "rrf_score": float(r.get("rrf_score", 0.0)),
+                }
+            )
 
-        # Re-sort by decayed importance
-        memories.sort(key=lambda m: m.importance, reverse=True)
-        return memories
+        return items
+
+    @staticmethod
+    def _importance_weight(importance: float, floor: float = 0.2) -> float:
+        """
+        Convert importance in [0, 1] to a multiplicative weight.
+        floor keeps low-importance memories from becoming unrankable.
+        """
+        try:
+            x = float(importance)
+        except Exception:
+            x = 0.0
+        x = max(0.0, min(1.0, x))
+        return floor + (1.0 - floor) * x
+
+    @staticmethod
+    def _type_weight(memory_type: MemoryType, preferred_types: Optional[List[MemoryType]]) -> float:
+        """
+        Apply soft penalty when memory type doesn't match preferred types.
+        """
+        if not preferred_types:
+            return 1.0
+        try:
+            if memory_type in preferred_types:
+                return 1.0
+        except Exception:
+            # Fail open: no penalty when type comparison fails.
+            return 1.0
+        return 0.35
+
+    def _rerank_with_soft_penalty(
+        self,
+        fused_results: List[dict],
+        top_k: int,
+        preferred_types: Optional[List[MemoryType]],
+    ) -> List[Memory]:
+        """
+        Multi-level post-filter rerank:
+        - Base score: RRF score
+        - Soft penalty: type mismatch
+        - Soft penalty: low importance (decayed)
+        """
+        items = self._apply_memory_decay(fused_results)
+
+        scored: List[dict] = []
+        for it in items:
+            m: Memory = it["memory"]
+            base = float(it.get("rrf_score", 0.0))
+            w_type = self._type_weight(m.memory_type, preferred_types)
+            w_imp = self._importance_weight(m.importance)
+            final_score = base * w_type * w_imp
+            scored.append({"score": final_score, "memory": m})
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return [x["memory"] for x in scored[:top_k]]
 
     @staticmethod
     def cache_key(player_id: str, npc_id: str, query: str) -> str:
