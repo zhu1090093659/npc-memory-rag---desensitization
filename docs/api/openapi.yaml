@@ -1,0 +1,646 @@
+openapi: 3.0.3
+info:
+  title: NPC Memory RAG API
+  description: |
+    NPC Memory RAG 系统 API 文档，包含两个独立服务：
+
+    ## 服务架构
+
+    | 服务 | 端口 | 说明 |
+    |------|------|------|
+    | **API Service** | 8000 | 面向客户端的 REST API |
+    | **Worker Service** | 8080 | Pub/Sub 任务处理 |
+
+    ```
+    Client -> API Service -> Pub/Sub -> Worker Service -> Elasticsearch
+                 |                           |
+                 +---------- Redis <---------+
+                         (Reply Channel)
+    ```
+
+    ## 认证
+
+    当前版本不需要认证。生产环境建议配置 Cloud Run IAM 或 API Gateway。
+
+  version: 1.0.0
+  contact:
+    name: NPC Memory RAG Team
+  license:
+    name: MIT
+
+servers:
+  - url: https://npc-memory-api-{project_number}.asia-southeast1.run.app
+    description: API Service (Production)
+    variables:
+      project_number:
+        default: "xxxxxxxxxxxx"
+        description: GCP Project Number
+  - url: http://localhost:8000
+    description: API Service (Local)
+  - url: https://npc-memory-worker-{project_number}.asia-southeast1.run.app
+    description: Worker Service (Production)
+    variables:
+      project_number:
+        default: "xxxxxxxxxxxx"
+        description: GCP Project Number
+  - url: http://localhost:8080
+    description: Worker Service (Local)
+
+tags:
+  - name: Memory
+    description: 记忆写入操作 (API Service)
+  - name: Search
+    description: 记忆搜索和上下文准备 (API Service)
+  - name: Pub/Sub
+    description: Pub/Sub 推送处理 (Worker Service)
+  - name: Health
+    description: 健康检查端点
+
+paths:
+  # ==================== API Service Endpoints ====================
+  /memories:
+    post:
+      tags:
+        - Memory
+      summary: 创建新记忆
+      description: |
+        创建新记忆（异步 request-reply 模式）。
+
+        API 将任务发送到 Pub/Sub，Worker 处理后通过 Redis 返回结果，
+        API 等待并返回给客户端。
+
+        **超时**: 默认 25 秒（可通过 REQUEST_TIMEOUT_SECONDS 配置）
+      operationId: createMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryCreateRequest'
+            examples:
+              questMemory:
+                summary: 任务相关记忆
+                value:
+                  player_id: "player_123"
+                  npc_id: "blacksmith_01"
+                  memory_type: "quest"
+                  content: "玩家帮助铁匠找回了被盗的祖传锤子"
+                  importance: 0.8
+                  emotion_tags: ["感谢", "信任"]
+                  game_context:
+                    location: "village_01"
+                    quest_id: "find_hammer"
+              dialogueMemory:
+                summary: 对话记忆
+                value:
+                  player_id: "player_456"
+                  npc_id: "merchant_01"
+                  memory_type: "dialogue"
+                  content: "商人向玩家推荐了一把传说中的剑"
+                  importance: 0.5
+                  emotion_tags: ["友好"]
+                  game_context: {}
+      responses:
+        '200':
+          description: 记忆创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryCreateResponse'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                memory_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "completed"
+                message: "Memory indexed"
+        '503':
+          description: 异步索引不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "Async indexing not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
+        '504':
+          description: Worker 超时
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "Worker timeout (task_id=550e8400-e29b-41d4-a716-446655440000)"
+
+  /search:
+    get:
+      tags:
+        - Search
+      summary: 混合搜索记忆
+      description: |
+        混合搜索记忆（BM25 + Vector + RRF 融合）。
+
+        **算法**:
+        1. 并行执行 BM25（关键词）和 Vector（语义）搜索
+        2. RRF 融合排序：`score = sum(1 / (k + rank_i))`，k=60
+        3. 记忆衰减：`importance *= exp(-0.01 * days)`
+
+        **缓存**: 结果缓存在 Redis，TTL 5 分钟
+      operationId: searchMemories
+      parameters:
+        - name: player_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 玩家 ID
+          example: "player_123"
+        - name: npc_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: NPC ID
+          example: "blacksmith_01"
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 搜索查询文本
+          example: "锤子"
+        - name: top_k
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 5
+          description: 返回结果数量
+        - name: memory_types
+          in: query
+          schema:
+            type: string
+          description: 记忆类型过滤，逗号分隔（如 "quest,dialogue"）
+          example: "quest,dialogue"
+        - name: time_range_days
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: 时间范围过滤（天）
+          example: 30
+      responses:
+        '200':
+          description: 搜索成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+              example:
+                memories:
+                  - id: "mem_001"
+                    player_id: "player_123"
+                    npc_id: "blacksmith_01"
+                    memory_type: "quest"
+                    content: "玩家帮助铁匠找回了祖传锤子"
+                    importance: 0.72
+                    emotion_tags: ["感谢", "信任"]
+                    timestamp: "2024-01-15T10:30:00"
+                    game_context:
+                      location: "village_01"
+                total: 1
+                query_time_ms: 45.2
+        '400':
+          description: 无效的记忆类型
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /context:
+    get:
+      tags:
+        - Search
+      summary: 获取 LLM 上下文
+      description: |
+        为 LLM 准备记忆上下文（RAG 场景）。
+
+        返回:
+        - 按重要性排序的相关记忆
+        - 互动历史摘要
+        - 基于情感标签计算的关系评分
+      operationId: getContextForLLM
+      parameters:
+        - name: player_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 玩家 ID
+        - name: npc_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: NPC ID
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 当前对话/话题
+        - name: max_memories
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+          description: 最大记忆数量
+      responses:
+        '200':
+          description: 上下文准备成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextResponse'
+              example:
+                memories: []
+                summary: "玩家曾帮助铁匠找回祖传锤子，建立了信任关系"
+                total_interactions: 5
+                last_interaction: "2024-01-15T10:30:00"
+                relationship_score: 0.75
+
+  # ==================== Worker Service Endpoints ====================
+  /pubsub/push:
+    post:
+      tags:
+        - Pub/Sub
+      summary: 处理 Pub/Sub 推送
+      description: |
+        处理 Google Cloud Pub/Sub 推送消息。
+
+        **Backpressure 机制**:
+        - 使用 MAX_INFLIGHT_TASKS 信号量控制并发
+        - 达到容量时返回 429，触发 Pub/Sub 重试
+        - Cloud Run 根据请求队列自动伸缩
+
+        **消息处理**:
+        - 返回 2xx 确认消息（ack）
+        - 返回 non-2xx 触发重试（nack）
+      operationId: handlePubSubPush
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubSubPushRequest'
+            examples:
+              indexTask:
+                summary: 索引任务
+                value:
+                  message:
+                    data: "eyJ0YXNrX2lkIjoidGVzdC0wMDEiLCJwbGF5ZXJfaWQiOiJwbGF5ZXJfMSIsIm5wY19pZCI6Im5wY19ibGFja3NtaXRoIiwibWVtb3J5X3R5cGUiOiJkaWFsb2d1ZSIsImNvbnRlbnQiOiJUaGUgYmxhY2tzbWl0aCBvZmZlcmVkIG1lIGEgc3dvcmQuIiwiaW1wb3J0YW5jZSI6MC44LCJlbW90aW9uX3RhZ3MiOlsiaGFwcHkiXSwidGltZXN0YW1wIjoiMjAyNS0wMS0wMVQwMDowMDowMCIsImdhbWVfY29udGV4dCI6e30sIm9wIjoiaW5kZXgifQ=="
+                    messageId: "123456789"
+                    publishTime: "2025-01-01T00:00:00.000Z"
+                  subscription: "projects/npc-memory-rag/subscriptions/index-tasks-push"
+      responses:
+        '200':
+          description: 处理成功（ack）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushSuccessResponse'
+        '204':
+          description: 消息格式无效，丢弃（ack，不重试）
+        '429':
+          description: 容量已满（触发 Pub/Sub 重试）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "At capacity, retry later"
+        '500':
+          description: 处理失败（nack，会重试）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ==================== Health Check Endpoints ====================
+  /health:
+    get:
+      tags:
+        - Health
+      summary: 健康检查
+      description: 基础健康检查端点（存活探针）。
+      operationId: healthCheck
+      responses:
+        '200':
+          description: 服务健康
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "healthy"
+
+  /ready:
+    get:
+      tags:
+        - Health
+      summary: 就绪检查
+      description: |
+        就绪检查端点（就绪探针）。
+        验证 Elasticsearch 连接是否可用。
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: 服务就绪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                status: "ready"
+        '503':
+          description: 服务未就绪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "ES not reachable"
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus 指标
+      description: |
+        Prometheus 指标端点。
+
+        **API Service 指标**:
+        - `npc_memory_cache_hits_total`: 缓存命中
+        - `npc_memory_cache_misses_total`: 缓存未命中
+
+        **Worker Service 指标**:
+        - `npc_memory_worker_messages_pulled_total`: 拉取的消息总数
+        - `npc_memory_worker_messages_processed_total`: 处理的消息总数
+        - `npc_memory_worker_bulk_latency_seconds`: ES 写入延迟
+        - `npc_memory_embedding_latency_seconds`: Embedding 生成延迟
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus 指标
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    # ==================== Request Schemas ====================
+    MemoryCreateRequest:
+      type: object
+      description: 创建记忆请求
+      required:
+        - player_id
+        - npc_id
+        - memory_type
+        - content
+      properties:
+        player_id:
+          type: string
+          minLength: 1
+          description: 玩家 ID
+          example: "player_123"
+        npc_id:
+          type: string
+          minLength: 1
+          description: NPC ID
+          example: "blacksmith_01"
+        memory_type:
+          type: string
+          enum: [dialogue, quest, trade, gift, combat, emotion]
+          description: 记忆类型
+          example: "quest"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: 记忆内容
+          example: "玩家帮助铁匠找回了被盗的祖传锤子"
+        importance:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: 重要性评分 (0-1)
+          example: 0.8
+        emotion_tags:
+          type: array
+          items:
+            type: string
+          default: []
+          description: 情感标签
+          example: ["感谢", "信任"]
+        game_context:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: 游戏上下文
+          example:
+            location: "village_01"
+            quest_id: "find_hammer"
+
+    PubSubPushRequest:
+      type: object
+      description: Pub/Sub 推送消息
+      required:
+        - message
+      properties:
+        message:
+          type: object
+          required:
+            - data
+          properties:
+            data:
+              type: string
+              format: byte
+              description: Base64 编码的 IndexTask JSON
+            messageId:
+              type: string
+              description: Pub/Sub 消息 ID
+            publishTime:
+              type: string
+              format: date-time
+              description: 发布时间
+            attributes:
+              type: object
+              additionalProperties:
+                type: string
+        subscription:
+          type: string
+          description: 订阅名称
+
+    IndexTask:
+      type: object
+      description: 索引任务
+      required:
+        - task_id
+        - player_id
+        - npc_id
+        - content
+        - memory_type
+        - timestamp
+      properties:
+        task_id:
+          type: string
+          description: 任务 ID（用作 ES 文档 ID）
+        player_id:
+          type: string
+        npc_id:
+          type: string
+        content:
+          type: string
+          description: 记忆内容（op=search 时为查询文本）
+        memory_type:
+          type: string
+          enum: [dialogue, quest, trade, gift, combat, emotion]
+        timestamp:
+          type: string
+          format: date-time
+        importance:
+          type: number
+          default: 0.5
+        emotion_tags:
+          type: array
+          items:
+            type: string
+          default: []
+        game_context:
+          type: object
+          default: {}
+        op:
+          type: string
+          enum: [index, search]
+          default: index
+          description: 操作类型（index=索引，search=搜索）
+        top_k:
+          type: integer
+          description: 搜索结果数量（op=search 时使用）
+        memory_types:
+          type: array
+          items:
+            type: string
+          description: 搜索类型过滤（op=search 时使用）
+        time_range_days:
+          type: integer
+          description: 搜索时间范围（op=search 时使用）
+
+    # ==================== Response Schemas ====================
+    MemoryCreateResponse:
+      type: object
+      properties:
+        task_id:
+          type: string
+          description: 任务 ID
+        memory_id:
+          type: string
+          description: 记忆 ID
+        status:
+          type: string
+          enum: [completed]
+        message:
+          type: string
+
+    MemoryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        player_id:
+          type: string
+        npc_id:
+          type: string
+        memory_type:
+          type: string
+        content:
+          type: string
+        importance:
+          type: number
+        emotion_tags:
+          type: array
+          items:
+            type: string
+        timestamp:
+          type: string
+          format: date-time
+        game_context:
+          type: object
+
+    SearchResponse:
+      type: object
+      properties:
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryResponse'
+        total:
+          type: integer
+        query_time_ms:
+          type: number
+
+    ContextResponse:
+      type: object
+      properties:
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryResponse'
+        summary:
+          type: string
+          description: 互动历史摘要
+        total_interactions:
+          type: integer
+          description: 总互动次数
+        last_interaction:
+          type: string
+          format: date-time
+          description: 最后互动时间
+        relationship_score:
+          type: number
+          description: 关系评分 (0-1)
+
+    PushSuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ok"]
+        task_id:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["healthy"]
+
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ready"]
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: 错误信息
