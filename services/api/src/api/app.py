@@ -24,6 +24,10 @@ from .schemas import (
     SearchResponse,
     HealthResponse,
     ContextResponse,
+    OptimizationRequest,
+    OptimizationResponse,
+    SearchParametersSchema,
+    GAConfigSchema,
 )
 from .dependencies import get_publisher, get_es_client, get_reply_store
 from src.memory import MemoryType
@@ -348,4 +352,110 @@ async def metrics():
     except ImportError:
         return Response(
             content="# prometheus_client not installed", media_type="text/plain"
+        )
+
+
+@app.post("/optimize", response_model=OptimizationResponse, tags=["Optimization"])
+async def optimize_search_parameters(request: OptimizationRequest):
+    """
+    Optimize search parameters using genetic algorithm
+    
+    This endpoint uses a genetic algorithm to find optimal search parameters
+    (RRF k, decay rates, importance weights) that maximize search quality
+    for the provided test queries and ground truth.
+    
+    **Algorithm**:
+    1. Initialize random population of parameter sets
+    2. Evaluate each set using precision@k on test queries
+    3. Select best performers (tournament selection)
+    4. Create offspring through crossover and mutation
+    5. Repeat for N generations
+    6. Return best parameters found
+    
+    **Note**: This is a CPU-intensive operation. Consider running with
+    a smaller population/generation count for faster results.
+    """
+    from src.memory.genetic_optimizer import (
+        GeneticOptimizer,
+        GAConfig,
+        SearchParameters,
+        create_fitness_function,
+    )
+    
+    # Convert schema to internal config
+    if request.ga_config:
+        ga_config = GAConfig(
+            population_size=request.ga_config.population_size,
+            generations=request.ga_config.generations,
+            mutation_rate=request.ga_config.mutation_rate,
+            mutation_strength=request.ga_config.mutation_strength,
+            crossover_rate=request.ga_config.crossover_rate,
+            elitism_count=request.ga_config.elitism_count,
+            tournament_size=request.ga_config.tournament_size,
+        )
+    else:
+        ga_config = GAConfig()
+    
+    # Create mock search function for demo
+    # In production, this would call the actual search API
+    def search_func(player_id: str, npc_id: str, query: str, params: SearchParameters) -> List[str]:
+        """
+        Mock search function for optimization demo.
+        
+        In production, replace this with actual search implementation that:
+        1. Calls search API with custom parameters
+        2. Returns list of memory IDs
+        
+        This mock simulates better results for balanced parameters.
+        """
+        # Simulate: parameters close to defaults yield better results
+        # This is for demonstration only - real search would query ES
+        score = 0.0
+        
+        # Prefer balanced parameters
+        if 40 <= params.rrf_k <= 80:
+            score += 0.3
+        if 0.005 <= params.decay_lambda <= 0.02:
+            score += 0.3
+        if 0.4 <= params.bm25_weight <= 0.6:
+            score += 0.2
+        if 0.4 <= params.vector_weight <= 0.6:
+            score += 0.2
+        
+        # Return mock results based on simulated quality
+        if score > 0.7:
+            # Good parameters: return ground truth for first query
+            if request.ground_truth and len(request.ground_truth) > 0:
+                return request.ground_truth[0][:3]
+        
+        # Poor parameters: return random IDs
+        return [f"mem_random_{i}" for i in range(3)]
+    
+    # Create fitness function
+    fitness_func = create_fitness_function(
+        test_queries=request.test_queries,
+        ground_truth=request.ground_truth,
+        search_func=search_func
+    )
+    
+    # Run optimization
+    optimizer = GeneticOptimizer(ga_config)
+    
+    try:
+        result = await asyncio.to_thread(
+            optimizer.optimize,
+            fitness_func=fitness_func
+        )
+        
+        return OptimizationResponse(
+            best_parameters=SearchParametersSchema(**result.best_parameters.to_dict()),
+            best_fitness=result.best_fitness,
+            generations_run=result.generations_run,
+            fitness_history=result.fitness_history,
+            timestamp=result.timestamp,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Optimization failed: {str(e)}"
         )

@@ -104,3 +104,113 @@ class ContextResponse(BaseModel):
     total_interactions: int
     last_interaction: Optional[datetime]
     relationship_score: float
+
+
+class SearchParametersSchema(BaseModel):
+    """Schema for search parameters that can be optimized"""
+    rrf_k: float = Field(60.0, description="RRF fusion k parameter")
+    decay_lambda: float = Field(0.01, description="Memory decay rate")
+    importance_floor: float = Field(0.2, description="Minimum importance weight")
+    type_mismatch_penalty: float = Field(0.35, description="Penalty for type mismatch")
+    bm25_weight: float = Field(0.5, description="BM25 contribution weight")
+    vector_weight: float = Field(0.5, description="Vector contribution weight")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "rrf_k": 60.0,
+                "decay_lambda": 0.01,
+                "importance_floor": 0.2,
+                "type_mismatch_penalty": 0.35,
+                "bm25_weight": 0.5,
+                "vector_weight": 0.5
+            }
+        }
+
+
+class GAConfigSchema(BaseModel):
+    """Schema for genetic algorithm configuration"""
+    population_size: int = Field(20, ge=5, le=100, description="Population size")
+    generations: int = Field(10, ge=1, le=100, description="Number of generations")
+    mutation_rate: float = Field(0.1, ge=0.0, le=1.0, description="Mutation probability")
+    mutation_strength: float = Field(0.2, ge=0.0, le=1.0, description="Mutation strength")
+    crossover_rate: float = Field(0.7, ge=0.0, le=1.0, description="Crossover probability")
+    elitism_count: int = Field(2, ge=0, le=10, description="Elite individuals to preserve")
+    tournament_size: int = Field(3, ge=2, le=10, description="Tournament selection size")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "population_size": 20,
+                "generations": 10,
+                "mutation_rate": 0.1,
+                "mutation_strength": 0.2,
+                "crossover_rate": 0.7,
+                "elitism_count": 2,
+                "tournament_size": 3
+            }
+        }
+
+
+class OptimizationRequest(BaseModel):
+    """Request model for GA optimization"""
+    test_queries: List[Dict[str, Any]] = Field(
+        ..., 
+        description="Test queries with player_id, npc_id, query fields"
+    )
+    ground_truth: List[List[str]] = Field(
+        ..., 
+        description="Expected memory IDs for each test query"
+    )
+    ga_config: Optional[GAConfigSchema] = Field(
+        None, 
+        description="GA configuration (uses defaults if not provided)"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "test_queries": [
+                    {"player_id": "p1", "npc_id": "n1", "query": "找回丢失的剑"},
+                    {"player_id": "p1", "npc_id": "n1", "query": "昨天的对话"}
+                ],
+                "ground_truth": [
+                    ["mem1", "mem2", "mem3"],
+                    ["mem4", "mem5"]
+                ],
+                "ga_config": {
+                    "population_size": 15,
+                    "generations": 8
+                }
+            }
+        }
+
+
+class OptimizationResponse(BaseModel):
+    """Response model for GA optimization"""
+    best_parameters: SearchParametersSchema
+    best_fitness: float
+    generations_run: int
+    fitness_history: List[Tuple[float, float, float]] = Field(
+        ..., 
+        description="Fitness history per generation: [(best, avg, worst), ...]"
+    )
+    timestamp: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "best_parameters": {
+                    "rrf_k": 55.3,
+                    "decay_lambda": 0.012,
+                    "importance_floor": 0.18,
+                    "type_mismatch_penalty": 0.32,
+                    "bm25_weight": 0.52,
+                    "vector_weight": 0.48
+                },
+                "best_fitness": 0.85,
+                "generations_run": 10,
+                "fitness_history": [(0.65, 0.45, 0.25), (0.75, 0.55, 0.35)],
+                "timestamp": "2026-01-07T15:00:00"
+            }
+        }
