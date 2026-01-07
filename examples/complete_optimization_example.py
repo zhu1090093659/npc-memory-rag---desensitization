@@ -11,7 +11,7 @@ This example demonstrates:
 import sys
 import os
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 # Add memory module to path
 module_path = os.path.join(os.path.dirname(__file__), '..', 'services', 'api', 'src', 'memory')
@@ -58,7 +58,7 @@ def simulate_search_system(query: Dict[str, str], params: SearchParameters) -> L
         return ["random_mem_1", "random_mem_2", "random_mem_3"]
 
 
-def create_test_dataset() -> tuple[List[Dict[str, str]], List[List[str]]]:
+def create_test_dataset() -> Tuple[List[Dict[str, str]], List[List[str]]]:
     """
     Create a test dataset with queries and expected results.
     
@@ -90,7 +90,7 @@ def evaluate_parameters(
     params: SearchParameters,
     test_queries: List[Dict[str, str]],
     ground_truth: List[List[str]]
-) -> tuple[float, Dict[str, Any]]:
+) -> Tuple[float, Dict[str, Any]]:
     """
     Evaluate search parameters and return detailed metrics.
     

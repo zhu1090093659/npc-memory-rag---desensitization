@@ -6,7 +6,6 @@ such as RRF fusion weights, memory decay rates, and importance thresholds.
 """
 
 import random
-import math
 from typing import List, Tuple, Dict, Any, Callable, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -292,10 +291,17 @@ class GeneticOptimizer:
                 Individual(parameters=params, generation=0)
                 for params in initial_population
             ]
-            # Fill remaining if needed
+            # Fill remaining slots if initial population is smaller than config
             while len(self.population) < self.config.population_size:
-                self.initialize_population()
-                break
+                params = SearchParameters(
+                    rrf_k=random.uniform(20.0, 100.0),
+                    decay_lambda=random.uniform(0.005, 0.05),
+                    importance_floor=random.uniform(0.1, 0.4),
+                    type_mismatch_penalty=random.uniform(0.2, 0.6),
+                    bm25_weight=random.uniform(0.3, 0.7),
+                    vector_weight=random.uniform(0.3, 0.7),
+                )
+                self.population.append(Individual(parameters=params, generation=0))
         else:
             self.initialize_population()
         
