@@ -23,50 +23,58 @@ npc-memory-rag/
 ## 系统架构
 
 ```mermaid
-flowchart TB
-    subgraph Client["客户端"]
-        GameClient["游戏客户端"]
+sequenceDiagram
+    autonumber
+    participant GameClient as "游戏客户端"
+    participant ApiService as "API Service (FastAPI)"
+    participant PubSub as "Pub/Sub"
+    participant PushWorker as "Push Worker (POST /pubsub/push)"
+    participant Redis as "Redis (reply channel)"
+    participant EmbeddingProvider as "Embedding API"
+    participant Elasticsearch as "Elasticsearch"
+
+    Note over ApiService,Redis: API publishes task then waits via BRPOP reply:{task_id}
+
+    rect rgba(0, 0, 0, 0)
+        Note over GameClient,Elasticsearch: 写入（op=index）: POST /memories
+        GameClient->>ApiService: POST /memories
+        ApiService->>PubSub: publish(IndexTask{op:index,task_id})
+        PubSub->>PushWorker: HTTP push (base64 IndexTask)
+        PushWorker->>EmbeddingProvider: embed(memory.content)
+        EmbeddingProvider-->>PushWorker: vector
+        PushWorker->>Elasticsearch: index(INDEX_ALIAS,id=task_id)
+        Elasticsearch-->>PushWorker: ok
+        PushWorker->>Redis: LPUSH reply:{task_id} payload + EXPIRE
+        ApiService->>Redis: BRPOP reply:{task_id} (timeout=REQUEST_TIMEOUT_SECONDS)
+        alt got reply
+            Redis-->>ApiService: {"status":"ok","memory_id":task_id}
+            ApiService-->>GameClient: 200 MemoryCreateResponse
+        else timeout
+            Redis-->>ApiService: nil
+            ApiService-->>GameClient: 504 Worker timeout
+        end
     end
 
-    subgraph API["API Service (FastAPI)"]
-        APIApp["services/api/src/api/app.py"]
-        Schemas["schemas.py"]
-        Deps["dependencies.py"]
+    rect rgba(0, 0, 0, 0)
+        Note over GameClient,Elasticsearch: 检索（op=search）: GET /search 与 GET /context 同链路
+        GameClient->>ApiService: GET /search (or /context)
+        ApiService->>PubSub: publish(IndexTask{op:search,task_id})
+        PubSub->>PushWorker: HTTP push (base64 IndexTask)
+        PushWorker->>EmbeddingProvider: embed(query)
+        EmbeddingProvider-->>PushWorker: vector
+        PushWorker->>Elasticsearch: hybrid_search(BM25+Vector+RRF)
+        Elasticsearch-->>PushWorker: hits
+        PushWorker->>Redis: LPUSH reply:{task_id} payload + EXPIRE
+        ApiService->>Redis: BRPOP reply:{task_id} (timeout=REQUEST_TIMEOUT_SECONDS)
+        Redis-->>ApiService: {"status":"ok","memories":[...]}
+        ApiService-->>GameClient: 200 SearchResponse (or ContextResponse)
     end
 
-    subgraph Core["Memory Core"]
-        Service["memory_service.py<br/>Facade"]
-        Search["search.py<br/>BM25+Vector+RRF"]
-        Write["write.py"]
-        Embed["embedding.py<br/>Qwen3"]
-        Models["models.py"]
+    alt backpressure (worker at capacity)
+        PubSub->>PushWorker: HTTP push
+        PushWorker-->>PubSub: 429 "At capacity, retry later"
+        Note over PubSub,PushWorker: Pub/Sub retries delivery later
     end
-
-    subgraph Worker["Worker Service (FastAPI)"]
-        PushApp["services/worker/src/indexing/push_app.py"]
-        Tasks["tasks.py"]
-    end
-
-    subgraph Infra["Infrastructure"]
-        ES["Elasticsearch<br/>混合检索"]
-        Redis["Redis<br/>缓存 + Reply"]
-        PubSub["Pub/Sub<br/>任务队列"]
-    end
-
-    GameClient -->|REST| APIApp
-    APIApp --> Service
-    Service --> Search
-    Service --> Write
-    Search --> Embed
-    Write --> Embed
-    Search --> ES
-    Write --> PubSub
-    PubSub --> PushApp
-    PushApp --> Embed
-    PushApp --> ES
-    PushApp -->|Reply| Redis
-    APIApp -->|Wait| Redis
-    Service --> Redis
 ```
 
 ## 核心特性

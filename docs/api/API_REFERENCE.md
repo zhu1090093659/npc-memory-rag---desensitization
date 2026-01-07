@@ -31,7 +31,6 @@ flowchart TB
     end
 
     API -->|异步任务| PubSub
-    API -->|直接查询| ES
     API -->|等待结果| Redis
     PubSub -->|推送| Worker
     Worker -->|索引/搜索| ES
@@ -103,7 +102,6 @@ curl -X POST http://localhost:8000/memories \
 
 | Status | Description |
 |--------|-------------|
-| 503 | 异步索引不可用（检查 INDEX_ASYNC_ENABLED 和 REDIS_URL） |
 | 504 | Worker 超时 |
 | 500 | 处理失败 |
 
@@ -388,7 +386,9 @@ Prometheus 指标端点。
 | ES_URL | Yes | http://localhost:9200 | Elasticsearch URL |
 | ES_API_KEY | No | - | Elastic Cloud API Key |
 | REDIS_URL | Yes | - | Redis URL（缓存 + reply） |
-| INDEX_ASYNC_ENABLED | No | false | 启用异步索引 |
+| PUBSUB_PROJECT_ID | Yes | - | GCP project ID |
+| PUBSUB_TOPIC | Yes | - | Pub/Sub topic name |
+| PUBSUB_PRODUCER | Yes | - | Pub/Sub producer tag |
 | REQUEST_TIMEOUT_SECONDS | No | 25 | 等待 Worker 超时（秒） |
 
 ## Worker Service
@@ -421,7 +421,7 @@ gcloud run deploy npc-memory-api \
   --region asia-southeast1 \
   --command "uvicorn" \
   --args "src.api.app:app,--host,0.0.0.0,--port,8080" \
-  --set-env-vars "INDEX_ASYNC_ENABLED=true" \
+  --set-env-vars "PUBSUB_PROJECT_ID=$(gcloud config get-value project),PUBSUB_TOPIC=index-tasks,PUBSUB_PRODUCER=api" \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,REDIS_URL=redis-url:latest" \
   --allow-unauthenticated
 ```

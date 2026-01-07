@@ -20,7 +20,7 @@ npc-memory-rag/
 │   │   ├── embedding.py         # Embedding 服务（Qwen3/stub）
 │   │   ├── es_schema.py         # ES 索引配置与创建
 │   │   ├── search.py            # 混合检索 (BM25 + Vector + RRF)
-│   │   └── write.py             # 写入操作 (同步/异步)
+│   │   └── write.py             # 写入操作 (async-only)
 │   │
 │   ├── indexing/                 # 异步索引模块
 │   │   ├── __init__.py          # 导出索引组件
@@ -97,9 +97,7 @@ npc-memory-rag/
 
 #### write.py (85 行)
 - `MemoryWriter`: 写入操作类
-- 同步写入 ES
-- 异步发布到 Pub/Sub
-- 开关控制
+- 异步发布到 Pub/Sub（async-only）
 
 ### 2. src/indexing - 异步索引模块
 
@@ -145,26 +143,12 @@ npc-memory-rag/
 
 ## 数据流
 
-### 同步写入流程
-
-```
-Memory对象
-    ↓
-MemoryWriter.add_memory()
-    ↓
-生成 Embedding（Qwen3 或 stub）
-    ↓
-ES.index()
-    ↓
-返回 memory_id
-```
-
 ### 异步写入流程（Push 模式）
 
 ```
 Memory对象
     ↓
-MemoryWriter.add_memory(async_index=True)
+MemoryWriter.add_memory()
     ↓
 转换为 IndexTask
     ↓
@@ -215,7 +199,6 @@ RRF 融合排序
 |--------|--------|------|
 | `ES_URL` | http://localhost:9200 | ES 连接地址 |
 | `ES_API_KEY` | - | Elastic Cloud API Key |
-| `INDEX_ASYNC_ENABLED` | false | 异步索引开关 |
 | `PUBSUB_PROJECT_ID` | - | GCP 项目 ID |
 | `PUBSUB_TOPIC` | index-tasks | Pub/Sub Topic |
 | `PUBSUB_SUBSCRIPTION` | index-tasks-sub | Pub/Sub 订阅 |
@@ -285,10 +268,8 @@ es_client.py
 - 统一入口，简化使用
 - 便于后续扩展
 
-### 2. 为什么分离同步/异步？
-- 开发阶段需要即时反馈
-- 生产阶段需要解耦和扩展
-- 通过开关灵活切换
+### 2. 为什么采用 async-only？
+本项目只保留异步模式：API 不直连 ES，写入/检索统一通过 Pub/Sub + Worker 解耦；接口通过 Redis request-reply 保持同步返回体验。
 
 ### 3. 为什么采用 Push Worker？
 - Worker 通过 HTTP 端点接收 Pub/Sub 推送，天然适配 Cloud Run 自动伸缩

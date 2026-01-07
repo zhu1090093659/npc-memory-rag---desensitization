@@ -139,7 +139,7 @@ class NPCMemoryService:
 | `embedding.py` | `EmbeddingService` | Embedding 生成（ModelScope Qwen3） |
 | `es_schema.py` | Index settings | ES 索引配置（30分片、HNSW） |
 | `search.py` | `MemorySearcher` | 混合检索 + RRF 融合 |
-| `write.py` | `MemoryWriter` | 同步/异步写入 |
+| `write.py` | `MemoryWriter` | 异步写入（async-only，发布到 Pub/Sub） |
 
 #### Layer 3: Async Indexing Module
 
@@ -405,7 +405,7 @@ Where:
 |--------|----------|-------------|
 | POST | `/memories` | Publish index task then wait reply (request-reply) |
 | GET | `/search` | Publish search task then wait reply (request-reply) |
-| GET | `/context` | Prepare LLM context (sync) |
+| GET | `/context` | Prepare LLM context (request-reply via Worker) |
 | GET | `/health` | Health check |
 | GET | `/ready` | Readiness check (verifies ES connection) |
 | GET | `/metrics` | Prometheus metrics |
@@ -610,16 +610,16 @@ class MemoryWriter:
 | `ES_URL` | http://localhost:9200 | Yes | Elasticsearch URL |
 | `ES_API_KEY` | - | No | Elastic Cloud API Key |
 | `INDEX_ALIAS` | npc_memories | No | ES index alias |
-| `INDEX_ASYNC_ENABLED` | false | No | Enable async indexing |
 
 #### Pub/Sub Configuration
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `PUBSUB_PROJECT_ID` | - | Yes* | GCP project ID |
-| `PUBSUB_TOPIC` | index-tasks | No | Pub/Sub topic name |
+| `PUBSUB_PROJECT_ID` | - | Yes | GCP project ID |
+| `PUBSUB_TOPIC` | index-tasks | Yes | Pub/Sub topic name |
+| `PUBSUB_PRODUCER` | - | Yes | Pub/Sub producer tag |
 
-*Required when INDEX_ASYNC_ENABLED=true
+*Required for request-reply endpoints (/memories, /search, /context)
 
 #### Embedding Configuration
 

@@ -112,14 +112,14 @@ paths:
                 memory_id: "550e8400-e29b-41d4-a716-446655440000"
                 status: "completed"
                 message: "Memory indexed"
-        '503':
-          description: 异步索引不可用
+        '500':
+          description: 处理失败
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
-                detail: "Async indexing not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
+                detail: "Failed to queue task: <error>"
         '504':
           description: Worker 超时
           content:
