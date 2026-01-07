@@ -113,6 +113,14 @@ sequenceDiagram
 - Prometheus 指标采集
 - 支持 Grafana 可视化
 
+### 6. 遗传算法优化（新功能）
+
+- **参数自动优化**：使用遗传算法优化搜索参数（RRF k、衰减率、权重等）
+- **适应度评估**：基于测试查询和 Ground Truth 评估参数质量
+- **进化策略**：锦标赛选择、均匀交叉、自适应变异
+- **API 集成**：`POST /optimize` 端点支持在线优化
+- 详见：[遗传算法优化指南](docs/GENETIC_ALGORITHM.md)
+
 ## 快速开始
 
 ### 1. 启动开发环境
@@ -270,6 +278,14 @@ open https://npc-memory-api-xxxxxxxxxxxx.asia-southeast1.run.app/docs
 - [X] 模块化设计（api/memory/indexing）
 - [X] REST API 服务（FastAPI + OpenAPI）
 - [X] 混合检索（BM25 + Vector + RRF）
+- [X] 真实 Embedding（Qwen3）
+- [X] 异步写入模式（Pub/Sub + Worker + Redis request-reply）
+- [X] Redis 查询缓存
+- [X] Prometheus 监控
+- [X] Push 模式 Worker
+- [X] DLQ 支持
+- [X] Cloud Run 双服务部署（API + Worker）
+- [X] 遗传算法参数优化（GA Optimizer）
 - [X] 真实 Embedding（Qwen3）
 - [X] 异步写入模式（Pub/Sub + Worker + Redis request-reply）
 - [X] Redis 查询缓存
