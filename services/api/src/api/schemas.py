@@ -191,9 +191,9 @@ class OptimizationResponse(BaseModel):
     best_parameters: SearchParametersSchema
     best_fitness: float
     generations_run: int
-    fitness_history: List[List[float]] = Field(
+    fitness_history: List[Tuple[float, float, float]] = Field(
         ..., 
-        description="Fitness history: [best, avg, worst] for each generation"
+        description="Fitness history per generation: [(best, avg, worst), ...]"
     )
     timestamp: str
 
@@ -210,7 +210,7 @@ class OptimizationResponse(BaseModel):
                 },
                 "best_fitness": 0.85,
                 "generations_run": 10,
-                "fitness_history": [[0.65, 0.45, 0.25], [0.75, 0.55, 0.35]],
+                "fitness_history": [(0.65, 0.45, 0.25), (0.75, 0.55, 0.35)],
                 "timestamp": "2026-01-07T15:00:00"
             }
         }

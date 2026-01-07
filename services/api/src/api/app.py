@@ -401,11 +401,35 @@ async def optimize_search_parameters(request: OptimizationRequest):
     def search_func(player_id: str, npc_id: str, query: str, params: SearchParameters) -> List[str]:
         """
         Mock search function for optimization demo.
-        In production, replace with actual search API call.
+        
+        In production, replace this with actual search implementation that:
+        1. Calls search API with custom parameters
+        2. Returns list of memory IDs
+        
+        This mock simulates better results for balanced parameters.
         """
-        # For demo: return empty list
-        # TODO: Implement actual search with custom parameters
-        return []
+        # Simulate: parameters close to defaults yield better results
+        # This is for demonstration only - real search would query ES
+        score = 0.0
+        
+        # Prefer balanced parameters
+        if 40 <= params.rrf_k <= 80:
+            score += 0.3
+        if 0.005 <= params.decay_lambda <= 0.02:
+            score += 0.3
+        if 0.4 <= params.bm25_weight <= 0.6:
+            score += 0.2
+        if 0.4 <= params.vector_weight <= 0.6:
+            score += 0.2
+        
+        # Return mock results based on simulated quality
+        if score > 0.7:
+            # Good parameters: return ground truth for first query
+            if request.ground_truth and len(request.ground_truth) > 0:
+                return request.ground_truth[0][:3]
+        
+        # Poor parameters: return random IDs
+        return [f"mem_random_{i}" for i in range(3)]
     
     # Create fitness function
     fitness_func = create_fitness_function(
