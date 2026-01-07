@@ -73,6 +73,8 @@ gcloud config get-value run/region --quiet
 - `ES_URL` / `ES_API_KEY`（推荐 Secret） + `INDEX_ALIAS`
 - `INDEX_VECTOR_DIMS` + `SEARCH_THREAD_POOL_SIZE` + `METRICS_PORT`
 - `ES_ROUTING_ENABLED`
+- `REDIS_URL`（request-reply + cache）
+- `PUBSUB_PROJECT_ID` + `PUBSUB_TOPIC` + `PUBSUB_PRODUCER`
 - `EMBEDDING_PROVIDER` + `EMBEDDING_BASE_URL` + `EMBEDDING_MODEL`
 - `EMBEDDING_ALLOW_STUB` + `EMBEDDING_CACHE_ENABLED` + `EMBEDDING_TIMEOUT` + `EMBEDDING_MAX_RETRIES`
 - `MODELSCOPE_API_KEY` 或 `EMBEDDING_API_KEY`（推荐 Secret）
@@ -84,7 +86,7 @@ gcloud run deploy npc-memory-api \
   --source services/api \
   --region asia-southeast1 \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
-  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,INDEX_ASYNC_ENABLED=true,REQUEST_TIMEOUT_SECONDS=55,REPLY_TTL_SECONDS=60,CACHE_TTL_SECONDS=300" \
+  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,REDIS_URL=redis-url,PUBSUB_PROJECT_ID=$(gcloud config get-value project),PUBSUB_TOPIC=index-tasks,PUBSUB_PRODUCER=api,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,REQUEST_TIMEOUT_SECONDS=55,REPLY_TTL_SECONDS=60,CACHE_TTL_SECONDS=300" \
   --quiet
 ```
 
@@ -93,7 +95,7 @@ gcloud run deploy npc-memory-worker \
   --source services/worker \
   --region asia-southeast1 \
   --set-secrets "ES_URL=es-url:latest,ES_API_KEY=es-api-key:latest,MODELSCOPE_API_KEY=modelscope-api-key:latest" \
-  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,MAX_INFLIGHT_TASKS=4,REPLY_TTL_SECONDS=60" \
+  --update-env-vars "INDEX_ALIAS=npc_memories,INDEX_VECTOR_DIMS=4096,SEARCH_THREAD_POOL_SIZE=16,METRICS_PORT=8000,ES_ROUTING_ENABLED=false,REDIS_URL=redis-url,PUBSUB_PROJECT_ID=$(gcloud config get-value project),PUBSUB_TOPIC=index-tasks,PUBSUB_PRODUCER=worker,EMBEDDING_PROVIDER=openai_compatible,EMBEDDING_BASE_URL=https://api.bltcy.ai/v1,EMBEDDING_MODEL=qwen3-embedding-8b,EMBEDDING_ALLOW_STUB=false,EMBEDDING_CACHE_ENABLED=false,EMBEDDING_TIMEOUT=30,EMBEDDING_MAX_RETRIES=3,MAX_INFLIGHT_TASKS=4,REPLY_TTL_SECONDS=60" \
   --quiet
 ```
 
@@ -128,7 +130,6 @@ Client -> API Service (FastAPI) -> Pub/Sub -> Worker Service -> Elasticsearch
 ### Design Patterns
 
 - **Facade**: `NPCMemoryService` as unified interface
-- **Strategy**: Sync/Async write switching via `pubsub_publisher` parameter
 - **Factory**: `IndexTask.create()` for task generation
 
 ### Hybrid Search (BM25 + Vector + RRF)
@@ -152,8 +153,10 @@ Located in `services/*/src/memory/search.py`:
 |----------|---------|-------------|
 | `ES_URL` | http://localhost:9200 | Elasticsearch URL |
 | `ES_API_KEY` | - | Elastic Cloud API Key |
-| `INDEX_ASYNC_ENABLED` | false | Enable async indexing |
-| `REDIS_URL` | - | Redis URL (required for async) |
+| `REDIS_URL` | - | Redis URL (required) |
+| `PUBSUB_PROJECT_ID` | - | GCP project ID (required) |
+| `PUBSUB_TOPIC` | - | Pub/Sub topic name (required) |
+| `PUBSUB_PRODUCER` | - | Pub/Sub message producer tag (required) |
 | `EMBEDDING_API_KEY` | - | Embedding service API key |
 | `EMBEDDING_BASE_URL` | - | OpenAI-compatible embedding API |
 | `EMBEDDING_MODEL` | qwen3-embedding-8b | Embedding model name |

@@ -2,16 +2,11 @@
 Memory write operations
 """
 
-import os
 from typing import List, Optional
 
-from elasticsearch.helpers import bulk, BulkIndexError
-
 from .models import Memory
-from src import get_env, get_env_bool
-
-# Elastic Cloud Serverless does not support routing parameter
-ES_ROUTING_ENABLED = get_env_bool("ES_ROUTING_ENABLED")
+from src import get_env
+from src.indexing import IndexTask
 
 
 class MemoryWriter:
@@ -28,106 +23,58 @@ class MemoryWriter:
         self.embedder = embedding_service
         self.index_alias = index_alias or get_env("INDEX_ALIAS")
         self.publisher = pubsub_publisher
-        self.async_enabled = get_env_bool("INDEX_ASYNC_ENABLED")
 
     def add_memory(self, memory: Memory, async_index: bool = None) -> str:
         """
-        Single write (for real-time scenarios)
-        If async_index is enabled, publishes task to Pub/Sub instead of direct indexing
+        Single write (async-only).
+        Publishes task to Pub/Sub; synchronous indexing is not supported.
         """
-        # Check if should use async indexing
-        use_async = async_index if async_index is not None else self.async_enabled
-
-        if use_async and self.publisher:
-            return self._publish_index_task(memory)
-        else:
-            return self._sync_index(memory)
-
-    def _sync_index(self, memory: Memory) -> str:
-        """Synchronous direct indexing"""
-        doc = memory.to_es_doc()
-
-        # Generate vector if not exists
-        if not memory.content_vector:
-            doc["content_vector"] = self.embedder.embed(memory.content)
-
-        # Build index params (routing not supported in Serverless mode)
-        index_params = {
-            "index": self.index_alias,
-            "id": doc["_id"],
-            "body": {k: v for k, v in doc.items() if not k.startswith("_")}
-        }
-        if ES_ROUTING_ENABLED:
-            index_params["routing"] = doc["_routing"]
-
-        response = self.es.index(**index_params)
-        return response["_id"]
+        if not self.publisher:
+            raise RuntimeError("Pub/Sub publisher not configured (async-only)")
+        return self._publish_index_task(memory)
 
     def _publish_index_task(self, memory: Memory) -> str:
         """Publish index task to Pub/Sub for async processing"""
-        from src.indexing import IndexTask
-
         task = IndexTask.create(
             player_id=memory.player_id,
             npc_id=memory.npc_id,
             content=memory.content,
             memory_type=memory.memory_type.value,
+            op="index",
             importance=memory.importance,
             emotion_tags=memory.emotion_tags,
             game_context=memory.game_context,
             timestamp=memory.timestamp
         )
 
-        message_id = self.publisher.publish(task)
+        self.publisher.publish(task)
         return task.task_id  # Return task_id as memory_id for tracking
 
     def bulk_add_memories(self, memories: List[Memory], batch_size: int = 500):
         """
-        Bulk write - high throughput scenario
-        Demonstrates: bulk API, batch embedding, error handling
+        Bulk write (async-only).
+        Queues tasks to Pub/Sub and returns task_id list.
         """
-        # Batch generate embeddings
-        contents = [m.content for m in memories if not m.content_vector]
-        if contents:
-            vectors = self.embedder.batch_embed(contents)
-            vector_idx = 0
-            for m in memories:
-                if not m.content_vector:
-                    m.content_vector = vectors[vector_idx]
-                    vector_idx += 1
+        if not self.publisher:
+            raise RuntimeError("Pub/Sub publisher not configured (async-only)")
 
-        # Build bulk operations (routing not supported in Serverless mode)
-        actions = []
-        for memory in memories:
-            doc = memory.to_es_doc()
-            action = {
-                "_index": self.index_alias,
-                "_id": doc["_id"],
-                "_source": {k: v for k, v in doc.items() if not k.startswith("_")}
-            }
-            if ES_ROUTING_ENABLED:
-                action["_routing"] = doc["_routing"]
-            actions.append(action)
+        tasks = [
+            IndexTask.create(
+                player_id=m.player_id,
+                npc_id=m.npc_id,
+                content=m.content,
+                memory_type=m.memory_type.value,
+                op="index",
+                importance=m.importance,
+                emotion_tags=m.emotion_tags,
+                game_context=m.game_context,
+                timestamp=m.timestamp,
+            )
+            for m in memories
+        ]
 
-        # Execute in batches
-        success_count = 0
-        error_count = 0
+        # Preserve previous batching behavior, but now as publish batching.
+        for i in range(0, len(tasks), batch_size):
+            self.publisher.publish_batch(tasks[i:i + batch_size])
 
-        for i in range(0, len(actions), batch_size):
-            batch = actions[i:i + batch_size]
-            try:
-                success, failed = bulk(
-                    self.es,
-                    batch,
-                    raise_on_error=False,
-                    refresh=False  # Don't refresh immediately for better throughput
-                )
-                success_count += success
-                error_count += len(failed)
-            except BulkIndexError as e:
-                error_count += len(e.errors)
-                # Log errors
-                for error in e.errors:
-                    print(f"Bulk error: {error}")
-
-        return {"success": success_count, "errors": error_count}
+        return [t.task_id for t in tasks]

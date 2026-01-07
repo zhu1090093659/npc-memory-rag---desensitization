@@ -6,14 +6,13 @@ Uses singleton pattern for shared resources (ES client, embedder, etc.)
 
 import os
 import json
-from functools import lru_cache
 from typing import Optional
 
 from src.es_client import create_es_client
 from src.memory import EmbeddingService
 from src.memory_service import NPCMemoryService, create_redis_cache
 from src.indexing import PubSubPublisher
-from src import get_env_bool, get_env_int
+from src import get_env_int
 
 
 # Lazy-initialized singletons
@@ -42,12 +41,10 @@ class RedisReplyStore:
             import redis
             self._client = redis.from_url(redis_url, decode_responses=True)
             self._client.ping()
-        except ImportError:
-            print("[RedisReplyStore] redis package not installed, reply-store disabled")
-            self._client = None
+        except ImportError as e:
+            raise RuntimeError("redis package not installed") from e
         except Exception as e:
-            print(f"[RedisReplyStore] Failed to connect: {e}, reply-store disabled")
-            self._client = None
+            raise RuntimeError(f"Failed to connect to Redis: {e}") from e
 
     @staticmethod
     def _key(task_id: str) -> str:
@@ -88,17 +85,14 @@ def get_embedder():
     return _embedder
 
 
-def get_publisher() -> Optional[PubSubPublisher]:
+def get_publisher() -> PubSubPublisher:
     """Get or create Pub/Sub publisher (singleton)"""
     global _publisher
     if _publisher is None:
-        # Only create publisher if async indexing is enabled
-        if get_env_bool("INDEX_ASYNC_ENABLED"):
-            try:
-                _publisher = PubSubPublisher()
-            except Exception as e:
-                print(f"[Dependencies] Failed to create PubSubPublisher: {e}")
-                _publisher = None
+        try:
+            _publisher = PubSubPublisher()
+        except Exception as e:
+            raise RuntimeError(f"Pub/Sub publisher init failed: {e}") from e
     return _publisher
 
 
@@ -111,12 +105,9 @@ def get_reply_store() -> Optional[RedisReplyStore]:
     redis_url = os.getenv("REDIS_URL")
     ttl_seconds = get_env_int("REPLY_TTL_SECONDS")
     if not redis_url:
-        print("[Dependencies] REDIS_URL not set, reply-store disabled")
-        _reply_store = None
-        return None
+        raise RuntimeError("REDIS_URL not set (required for request-reply)")
 
-    store = RedisReplyStore(redis_url=redis_url, ttl_seconds=ttl_seconds)
-    _reply_store = store if store._client else None
+    _reply_store = RedisReplyStore(redis_url=redis_url, ttl_seconds=ttl_seconds)
     return _reply_store
 
 

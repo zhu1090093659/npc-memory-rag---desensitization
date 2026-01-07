@@ -64,6 +64,13 @@ _redis_client = None
 # Reply channel configuration (request-reply via Redis)
 REPLY_TTL_SECONDS = get_env_int("REPLY_TTL_SECONDS")
 
+@app.on_event("startup")
+async def _startup_fail_fast():
+    """Fail fast on missing dependencies/config at startup."""
+    get_redis_client()
+    get_es_client()
+    get_embedder()
+
 
 def get_es_client():
     """Get or create ES client (singleton)"""

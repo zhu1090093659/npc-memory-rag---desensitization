@@ -60,8 +60,7 @@ flowchart TB
     Search --> Embed
     Write --> Embed
     Search --> ES
-    Write -->|同步| ES
-    Write -->|异步| PubSub
+    Write --> PubSub
     PubSub --> PushApp
     PushApp --> Embed
     PushApp --> ES
@@ -152,48 +151,14 @@ python -c "from src.es_client import create_es_client, initialize_index; initial
 cd services/api
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 
-# 启动 Worker 服务（异步模式需要，另开终端）
+# 启动 Worker 服务（必需，另开终端）
 cd services/worker
 uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 ```
 
 启动后访问 http://localhost:8000/docs 查看 OpenAPI 文档。
 
-### 5. 同步模式使用
-
-```python
-from src.es_client import create_es_client
-from src.memory import EmbeddingService, Memory, MemoryType
-from src.memory_service import NPCMemoryService, create_redis_cache
-
-# 初始化
-es = create_es_client()
-embedder = EmbeddingService()
-cache = create_redis_cache()  # 可选
-
-service = NPCMemoryService(es, embedder, cache_client=cache)
-
-# 写入记忆
-memory = Memory(
-    id="mem_001",
-    player_id="player_123",
-    npc_id="npc_456",
-    memory_type=MemoryType.DIALOGUE,
-    content="玩家与NPC的对话内容",
-    importance=0.7
-)
-service.add_memory(memory)
-
-# 检索记忆
-results = service.search_memories(
-    player_id="player_123",
-    npc_id="npc_456",
-    query="对话",
-    top_k=5
-)
-```
-
-### 6. 异步模式（Worker）
+### 5. 异步模式（Worker）
 
 异步模式需要配置 Pub/Sub 和 Redis：
 
@@ -215,7 +180,6 @@ uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 |------|--------|------|
 | `ES_URL` | http://localhost:9200 | Elasticsearch 地址 |
 | `ES_API_KEY` | - | Elastic Cloud API Key |
-| `INDEX_ASYNC_ENABLED` | false | 启用异步索引模式 |
 | `INDEX_ALIAS` | npc_memories | ES 索引别名 |
 
 ### Embedding 配置
@@ -236,7 +200,7 @@ uvicorn src.indexing.push_app:app --host 0.0.0.0 --port 8080
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `REDIS_URL` | - | Redis 地址（缓存 + request-reply） |
+| `REDIS_URL` | - | Redis 地址（必需，缓存 + request-reply） |
 | `CACHE_TTL_SECONDS` | 300 | 查询缓存过期时间（秒） |
 
 ### Rerank 配置（可选，轻量精排）
@@ -299,7 +263,7 @@ open https://npc-memory-api-xxxxxxxxxxxx.asia-southeast1.run.app/docs
 - [X] REST API 服务（FastAPI + OpenAPI）
 - [X] 混合检索（BM25 + Vector + RRF）
 - [X] 真实 Embedding（Qwen3）
-- [X] 同步/异步写入模式
+- [X] 异步写入模式（Pub/Sub + Worker + Redis request-reply）
 - [X] Redis 查询缓存
 - [X] Prometheus 监控
 - [X] Push 模式 Worker

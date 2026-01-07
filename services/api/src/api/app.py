@@ -11,12 +11,11 @@ Architecture:
                        (direct search)
 """
 
-import os
-import time
 import asyncio
 from typing import Optional, List
+from datetime import datetime
 
-from fastapi import FastAPI, Query, HTTPException, Depends, Response
+from fastapi import FastAPI, Query, HTTPException, Response
 
 from .schemas import (
     MemoryCreateRequest,
@@ -25,15 +24,64 @@ from .schemas import (
     SearchResponse,
     HealthResponse,
     ContextResponse,
-    MemoryTypeEnum,
 )
-from .dependencies import get_memory_service, get_publisher, get_es_client, get_reply_store
+from .dependencies import get_publisher, get_es_client, get_reply_store
 from src.memory import MemoryType
 from src.indexing import IndexTask
-from src.metrics import inc_cache_hit, inc_cache_miss
 from src import get_env_int
 
 REQUEST_TIMEOUT_SECONDS = get_env_int("REQUEST_TIMEOUT_SECONDS")
+
+def _build_summary(memories: List[dict]) -> str:
+    """Build concise summary of memories."""
+    if not memories:
+        return "No previous interactions"
+
+    type_counts: dict[str, int] = {}
+    emotions: List[str] = []
+    seen_emotions = set()
+
+    for m in memories:
+        mtype = str(m.get("memory_type") or "")
+        if mtype:
+            type_counts[mtype] = type_counts.get(mtype, 0) + 1
+
+        for e in (m.get("emotion_tags") or []):
+            if e not in seen_emotions:
+                seen_emotions.add(e)
+                emotions.append(e)
+
+    summary_parts = [f"{count}次{mtype}记忆" for mtype, count in type_counts.items()]
+    summary = "、".join(summary_parts) if summary_parts else "No previous interactions"
+
+    top_emotions = emotions[:3]
+    if top_emotions:
+        summary += f"，主要情感：{', '.join(top_emotions)}"
+    return summary
+
+
+def _relationship_score(memories: List[dict]) -> float:
+    """Calculate relationship score from -1 to 1."""
+    if not memories:
+        return 0.0
+
+    positive_emotions = {"感谢", "信任", "友好", "喜悦", "赞赏"}
+    negative_emotions = {"愤怒", "失望", "怀疑", "恐惧", "厌恶"}
+
+    positive_count = 0
+    negative_count = 0
+
+    for m in memories:
+        for e in (m.get("emotion_tags") or []):
+            if e in positive_emotions:
+                positive_count += 1
+            elif e in negative_emotions:
+                negative_count += 1
+
+    total = positive_count + negative_count
+    if total == 0:
+        return 0.0
+    return (positive_count - negative_count) / total
 
 
 app = FastAPI(
@@ -61,7 +109,6 @@ API Service          Worker Service
 ## Design Patterns
 
 - **Facade**: NPCMemoryService as unified interface
-- **Strategy**: Sync/Async write switching
 - **Factory**: IndexTask.create() for task generation
 """,
     version="1.0.0",
@@ -69,6 +116,12 @@ API Service          Worker Service
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+
+@app.on_event("startup")
+async def _startup_fail_fast():
+    """Fail fast on missing dependencies/config at startup."""
+    get_publisher()
+    get_reply_store()
 
 
 @app.post("/memories", response_model=MemoryCreateResponse, tags=["Memory"])
@@ -81,12 +134,6 @@ async def create_memory(request: MemoryCreateRequest):
     """
     publisher = get_publisher()
     reply_store = get_reply_store()
-
-    if publisher is None or reply_store is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Async indexing not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
-        )
 
     task = IndexTask.create(
         player_id=request.player_id,
@@ -150,19 +197,14 @@ async def search_memories(
     publisher = get_publisher()
     reply_store = get_reply_store()
 
-    if publisher is None or reply_store is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Async search not available. Ensure INDEX_ASYNC_ENABLED=true and REDIS_URL is set"
-        )
-
     # Parse memory types filter
-    types: Optional[List[MemoryType]] = None
     type_values: Optional[List[str]] = None
     if memory_types:
         try:
             type_values = [t.strip() for t in memory_types.split(",") if t.strip()]
-            types = [MemoryType(t) for t in type_values]
+            # Validate provided types.
+            for t in type_values:
+                MemoryType(t)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid memory type: {e}")
 
@@ -214,38 +256,50 @@ async def get_context_for_llm(
     - Summary of interaction history
     - Relationship score based on emotion tags
     """
-    service = get_memory_service()
+    publisher = get_publisher()
+    reply_store = get_reply_store()
 
     try:
-        context = service.prepare_context_for_llm(
+        task = IndexTask.create(
             player_id=player_id,
             npc_id=npc_id,
-            current_query=query,
-            max_memories=max_memories,
+            content=query,
+            memory_type="search",
+            op="search",
+            top_k=max_memories,
         )
+        publisher.publish(task)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to queue context task: {e}")
+
+    try:
+        result = await asyncio.to_thread(reply_store.wait, task.task_id, REQUEST_TIMEOUT_SECONDS)
+        if result is None:
+            raise HTTPException(status_code=504, detail=f"Worker timeout (task_id={task.task_id})")
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=500, detail=f"Worker failed: {result}")
+
+        memories = result.get("memories", []) or []
+        last_ts = None
+        if memories:
+            ts = memories[0].get("timestamp")
+            if ts:
+                try:
+                    last_ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                except Exception:
+                    last_ts = None
 
         return ContextResponse(
-            memories=[
-                MemoryResponse(
-                    id=m.id,
-                    player_id=m.player_id,
-                    npc_id=m.npc_id,
-                    memory_type=m.memory_type.value,
-                    content=m.content,
-                    importance=m.importance,
-                    emotion_tags=m.emotion_tags,
-                    timestamp=m.timestamp,
-                    game_context=m.game_context or {},
-                )
-                for m in context.memories
-            ],
-            summary=context.summary,
-            total_interactions=context.total_interactions,
-            last_interaction=context.last_interaction,
-            relationship_score=context.relationship_score,
+            memories=[MemoryResponse(**m) for m in memories],
+            summary=_build_summary(memories),
+            total_interactions=len(memories),
+            last_interaction=last_ts,
+            relationship_score=_relationship_score(memories),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Context preparation failed: {e}")
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed to wait for worker: {e}")
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
